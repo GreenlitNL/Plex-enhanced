@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plex: Enhanced Player (Video Crop, 5s Skip Forward & Backward, Speed Control, PiP)
 // @namespace    https://github.com/GreenlitNL/Plex-enhanced
-// @version      6.1.0
+// @version      6.2.0
 // @description  All-in-one player enhancements for Plex Web: aspect ratio crop ('C' key), cinema black theater backdrop (no white bars), 5s skip forward & backward ('ArrowRight'/'ArrowLeft' + matching '5' icons), playback speed controls ('[' and ']'), Picture-in-Picture ('P' key + player bar button), and persistent dual-setting player status HUD ('I' key)
 // @author       GreenlitNL
 // @match        *://app.plex.tv/*
@@ -77,9 +77,8 @@
     `;
 
     const PIP_ICON_SVG = `
-        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;">
-            <rect x="2" y="4" width="20" height="16" rx="2"></rect>
-            <rect x="12" y="10" width="8" height="6" rx="1" fill="currentColor" fill-opacity="0.35"></rect>
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" style="vertical-align: middle;">
+            <path fill-rule="evenodd" clip-rule="evenodd" d="M3.75 4.5A1.75 1.75 0 0 0 2 6.25v11.5c0 .966.784 1.75 1.75 1.75h16.5A1.75 1.75 0 0 0 22 17.75V6.25A1.75 1.75 0 0 0 20.25 4.5H3.75zM4 6.5h16v11H4V6.5zm7 4.25a.75.75 0 0 1 .75-.75h6.5a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-.75.75h-6.5a.75.75 0 0 1-.75-.75v-5z"></path>
         </svg>
     `;
 
@@ -680,8 +679,23 @@
         );
     }
 
+    // Generates an SVG string matching the exact Chroma icon classes and dimensions of the sibling buttons
+    function getPipButtonInnerSvg(referenceBtn) {
+        const refSvg = referenceBtn ? referenceBtn.querySelector('svg') : null;
+        const cls = refSvg ? (refSvg.getAttribute('class') || '') : '';
+        const width = refSvg ? (refSvg.getAttribute('width') || '20') : '20';
+        const height = refSvg ? (refSvg.getAttribute('height') || '20') : '20';
+        const clsAttr = cls ? ` class="${cls}"` : '';
+
+        return `
+            <svg viewBox="0 0 24 24" width="${width}" height="${height}" fill="currentColor"${clsAttr} style="display: block; vertical-align: middle;">
+                <path fill-rule="evenodd" clip-rule="evenodd" d="M3.75 4.5A1.75 1.75 0 0 0 2 6.25v11.5c0 .966.784 1.75 1.75 1.75h16.5A1.75 1.75 0 0 0 22 17.75V6.25A1.75 1.75 0 0 0 20.25 4.5H3.75zM4 6.5h16v11H4V6.5zm7 4.25a.75.75 0 0 1 .75-.75h6.5a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-.75.75h-6.5a.75.75 0 0 1-.75-.75v-5z"></path>
+            </svg>
+        `.trim();
+    }
+
     // Updates the PiP button tooltip, aria-attributes, and active styling
-    function updatePipButtonState(btn, isActive) {
+    function updatePipButtonState(btn, isActive, referenceBtn = null) {
         if (!btn) return;
         const label = isActive ? 'Exit Picture-in-Picture (P)' : 'Picture-in-Picture (P)';
         btn.setAttribute('aria-label', label);
@@ -690,7 +704,9 @@
         btn.classList.toggle('is-active', isActive);
 
         const svg = btn.querySelector('svg');
-        if (svg) {
+        if (!svg && referenceBtn) {
+            btn.innerHTML = getPipButtonInnerSvg(referenceBtn);
+        } else if (svg) {
             svg.style.color = isActive ? '#e5a00d' : '';
         }
     }
@@ -730,56 +746,102 @@
         }
     }
 
+    // Resolves the best anchor button in the playback control bar (prioritizing the repeat button)
+    function findPipAnchor() {
+        // Priority 1: Repeat button in the right controls row (places PiP immediately to the left of repeat)
+        const repeatBtn = document.querySelector(
+            'button[data-testid*="repeat" i], button[aria-label*="repeat" i], button[aria-label*="herhaal" i], button[title*="repeat" i], button[title*="herhaal" i]'
+        );
+        if (repeatBtn && repeatBtn.parentElement) {
+            return { anchor: repeatBtn, insertBefore: true };
+        }
+
+        // Priority 2: Shuffle button in that same options row
+        const shuffleBtn = document.querySelector(
+            'button[data-testid*="shuffle" i], button[aria-label*="shuffle" i], button[aria-label*="willekeurig" i], button[title*="shuffle" i], button[title*="willekeurig" i]'
+        );
+        if (shuffleBtn && shuffleBtn.parentElement) {
+            return { anchor: shuffleBtn, insertBefore: true };
+        }
+
+        // Priority 3: Streams / Audio & Subtitles button
+        const streamsBtn = document.querySelector(
+            'button[data-testid="streamsButton"], button[data-testid*="streams" i], button[data-testid*="subtitles" i], button[aria-label*="streams" i], button[aria-label*="subtitles" i], button[aria-label*="audio" i]'
+        );
+        if (streamsBtn && streamsBtn.parentElement) {
+            return { anchor: streamsBtn, insertBefore: true };
+        }
+
+        // Priority 4: Settings button
+        const settingsBtn = document.querySelector(
+            'button[data-testid="playerSettingsButton"], button[data-testid*="settings" i], button[aria-label*="settings" i], button[aria-label*="instelling" i]'
+        );
+        if (settingsBtn && settingsBtn.parentElement) {
+            return { anchor: settingsBtn, insertBefore: true };
+        }
+
+        // Priority 5: Fullscreen button
+        const fullscreenBtn = document.querySelector(
+            'button[data-testid="enterFullscreenButton"], button[data-testid="exitFullscreenButton"], button[aria-label*="fullscreen" i], button[title*="fullscreen" i]'
+        );
+        if (fullscreenBtn && fullscreenBtn.parentElement) {
+            return { anchor: fullscreenBtn, insertBefore: true };
+        }
+
+        // Priority 6: Close button
+        const closeBtn = document.querySelector(
+            'button[data-testid="playerControlsCloseButton"], button[data-testid="closeButton"], button[aria-label*="close" i]'
+        );
+        if (closeBtn && closeBtn.parentElement) {
+            return { anchor: closeBtn, insertBefore: true };
+        }
+
+        return null;
+    }
+
     // Patches or creates the PiP button in Plex's playback control bar
     function patchPipButton() {
         const video = getVideo();
         if (!video || isMiniPlayer(video)) return;
 
+        const anchorResult = findPipAnchor();
+        if (!anchorResult) return;
+
+        const { anchor, insertBefore } = anchorResult;
+        const parent = anchor.parentElement;
+        if (!parent) return;
+
         const active = isPipActive(video);
-        const existingBtn = document.querySelector('.plex-enhanced-pip-btn');
-        if (existingBtn && existingBtn.isConnected) {
-            updatePipButtonState(existingBtn, active);
-            return;
-        }
+        let pipBtn = document.querySelector('.plex-enhanced-pip-btn');
 
-        // Locate anchor button in Plex player control bar
-        const fullscreenBtn = document.querySelector(
-            'button[data-testid="enterFullscreenButton"], button[data-testid="exitFullscreenButton"], button[aria-label*="fullscreen" i], button[title*="fullscreen" i]'
-        );
-        const closeBtn = document.querySelector(
-            'button[data-testid="playerControlsCloseButton"], button[data-testid="closeButton"], button[aria-label*="close" i]'
-        );
-        const settingsBtn = document.querySelector(
-            'button[data-testid="playerSettingsButton"], button[data-testid*="settings" i]'
-        );
-        const anchorBtn = fullscreenBtn || closeBtn || settingsBtn;
-        if (!anchorBtn || !anchorBtn.parentElement) return;
+        if (!pipBtn || !pipBtn.isConnected) {
+            pipBtn = document.createElement('button');
+            pipBtn.type = 'button';
+            pipBtn.className = `plex-enhanced-pip-btn ${anchor.className}`;
+            pipBtn.innerHTML = getPipButtonInnerSvg(anchor);
+            pipBtn.dataset.plexPipBound = 'true';
 
-        const parent = anchorBtn.parentElement;
-        const pipBtn = document.createElement('button');
-        pipBtn.type = 'button';
-        pipBtn.className = `plex-enhanced-pip-btn ${anchorBtn.className}`;
-        pipBtn.innerHTML = PIP_ICON_SVG;
-        pipBtn.dataset.plexPipBound = 'true';
+            pipBtn.addEventListener('click', async e => {
+                e.preventDefault();
+                e.stopPropagation();
+                e.stopImmediatePropagation();
+                const v = getVideo();
+                if (v) await togglePictureInPicture(v);
+            }, true);
 
-        updatePipButtonState(pipBtn, active);
-
-        pipBtn.addEventListener('click', async e => {
-            e.preventDefault();
-            e.stopPropagation();
-            e.stopImmediatePropagation();
-            const v = getVideo();
-            if (v) await togglePictureInPicture(v);
-        }, true);
-
-        // Place PiP right before fullscreen button, or before close button, or at the end
-        if (fullscreenBtn && fullscreenBtn.parentElement === parent) {
-            parent.insertBefore(pipBtn, fullscreenBtn);
-        } else if (closeBtn && closeBtn.parentElement === parent) {
-            parent.insertBefore(pipBtn, closeBtn);
+            if (insertBefore) {
+                parent.insertBefore(pipBtn, anchor);
+            } else {
+                parent.appendChild(pipBtn);
+            }
         } else {
-            parent.appendChild(pipBtn);
+            // Keep PiP button located directly to the left of the anchor in the row
+            if (insertBefore && (pipBtn.parentElement !== parent || pipBtn.nextElementSibling !== anchor)) {
+                parent.insertBefore(pipBtn, anchor);
+            }
         }
+
+        updatePipButtonState(pipBtn, active, anchor);
     }
 
     // PiP lifecycle event handlers for instant UI and OSD synchronization
@@ -952,5 +1014,5 @@
     // Initial run on script injection
     handleDomUpdate();
 
-    console.log('[Plex Enhanced Player] Script v6.1 loaded.');
+    console.log('[Plex Enhanced Player] Script v6.2 loaded.');
 })();
