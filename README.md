@@ -8,9 +8,9 @@ All-in-one web player enhancement userscript for Plex Web (`app.plex.tv`, local 
 
 | Script | Target | Direct Install | Dev Loader |
 | :--- | :--- | :--- | :--- |
-| **Plex: Enhanced Player** | Plex Web (`app.plex.tv`, local servers) | [`plex-enhanced-player.user.js`](./plex-enhanced-player.user.js) | [`plex-enhanced-player.dev.user.js`](./plex-enhanced-player.dev.user.js) |
+| **Plex: Enhanced Player** | Plex Web (`app.plex.tv`, local servers) | [Install Script ➔](https://raw.githubusercontent.com/GreenlitNL/Plex-enhanced/main/plex-enhanced-player.user.js) | [`plex-enhanced-player.dev.user.js`](./plex-enhanced-player.dev.user.js) |
 
-*Clicking `plex-enhanced-player.user.js` in Tampermonkey will prompt installation.*
+*Clicking the **Install Script** link above will automatically open Tampermonkey's installation dialog in Chrome.*
 
 ---
 
