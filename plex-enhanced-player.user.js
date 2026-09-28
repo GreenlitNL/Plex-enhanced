@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Plex: Enhanced Player (Video Crop, 5s Skip Forward & Backward, Speed Control)
+// @name         Plex: Enhanced Player (Video Crop, 5s Skip Forward & Backward, Speed Control, PiP)
 // @namespace    https://github.com/GreenlitNL/Plex-enhanced
-// @version      6.0.0
-// @description  All-in-one player enhancements for Plex Web: aspect ratio crop ('C' key), cinema black theater backdrop (no white bars), 5s skip forward & backward ('ArrowRight'/'ArrowLeft' + matching '5' icons), playback speed controls ('[' and ']'), and persistent dual-setting player status HUD ('I' key)
+// @version      6.1.0
+// @description  All-in-one player enhancements for Plex Web: aspect ratio crop ('C' key), cinema black theater backdrop (no white bars), 5s skip forward & backward ('ArrowRight'/'ArrowLeft' + matching '5' icons), playback speed controls ('[' and ']'), Picture-in-Picture ('P' key + player bar button), and persistent dual-setting player status HUD ('I' key)
 // @author       GreenlitNL
 // @match        *://app.plex.tv/*
 // @match        *://*.plex.tv/*
@@ -73,6 +73,13 @@
             <path d="M6.5 12h.01"></path>
             <path d="M17.5 12h.01"></path>
             <path d="M12 6.5v.01"></path>
+        </svg>
+    `;
+
+    const PIP_ICON_SVG = `
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;">
+            <rect x="2" y="4" width="20" height="16" rx="2"></rect>
+            <rect x="12" y="10" width="8" height="6" rx="1" fill="currentColor" fill-opacity="0.35"></rect>
         </svg>
     `;
 
@@ -259,6 +266,20 @@
                 width: 1px;
                 height: 32px;
                 background: rgba(255, 255, 255, 0.16);
+            }
+
+            /* Picture-in-Picture Control Bar Button */
+            .plex-enhanced-pip-btn {
+                position: relative;
+                cursor: pointer;
+                transition: color 0.15s ease, opacity 0.15s ease, transform 0.15s ease;
+            }
+            .plex-enhanced-pip-btn:hover {
+                color: #ffffff !important;
+                opacity: 1 !important;
+            }
+            .plex-enhanced-pip-btn.is-active svg {
+                color: #e5a00d !important;
             }
         `;
         document.head.appendChild(style);
@@ -647,10 +668,153 @@
     }
 
     /* ==========================================================================
+       MODULE 4: PICTURE-IN-PICTURE (PIP)
+       ========================================================================== */
+
+    // Checks if video is currently displaying in Picture-in-Picture mode
+    function isPipActive(video = getVideo()) {
+        if (!video) return false;
+        return Boolean(
+            document.pictureInPictureElement === video ||
+            (video.webkitPresentationMode && video.webkitPresentationMode === 'picture-in-picture')
+        );
+    }
+
+    // Updates the PiP button tooltip, aria-attributes, and active styling
+    function updatePipButtonState(btn, isActive) {
+        if (!btn) return;
+        const label = isActive ? 'Exit Picture-in-Picture (P)' : 'Picture-in-Picture (P)';
+        btn.setAttribute('aria-label', label);
+        btn.setAttribute('title', label);
+        btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+        btn.classList.toggle('is-active', isActive);
+
+        const svg = btn.querySelector('svg');
+        if (svg) {
+            svg.style.color = isActive ? '#e5a00d' : '';
+        }
+    }
+
+    // Toggles browser native Picture-in-Picture
+    async function togglePictureInPicture(video = getVideo()) {
+        if (!video) return;
+
+        const pipSupported = Boolean(
+            document.pictureInPictureEnabled ||
+            video.webkitSupportsPresentationMode
+        );
+
+        if (!pipSupported) {
+            showActionOsd({
+                iconSvg: PIP_ICON_SVG,
+                title: 'Picture-in-Picture',
+                badge: 'UNAVAILABLE',
+                subtitle: 'Browser does not support Picture-in-Picture',
+                isOriginal: false
+            });
+            console.warn('[Plex Enhanced Player] Picture-in-Picture is not supported in this browser.');
+            return;
+        }
+
+        try {
+            if (document.pictureInPictureElement) {
+                await document.exitPictureInPicture();
+            } else if (typeof video.requestPictureInPicture === 'function') {
+                await video.requestPictureInPicture();
+            } else if (video.webkitSupportsPresentationMode && typeof video.webkitSetPresentationMode === 'function') {
+                const mode = video.webkitPresentationMode === 'picture-in-picture' ? 'inline' : 'picture-in-picture';
+                video.webkitSetPresentationMode(mode);
+            }
+        } catch (err) {
+            console.warn('[Plex Enhanced Player] Picture-in-Picture toggle failed:', err);
+        }
+    }
+
+    // Patches or creates the PiP button in Plex's playback control bar
+    function patchPipButton() {
+        const video = getVideo();
+        if (!video || isMiniPlayer(video)) return;
+
+        const active = isPipActive(video);
+        const existingBtn = document.querySelector('.plex-enhanced-pip-btn');
+        if (existingBtn && existingBtn.isConnected) {
+            updatePipButtonState(existingBtn, active);
+            return;
+        }
+
+        // Locate anchor button in Plex player control bar
+        const fullscreenBtn = document.querySelector(
+            'button[data-testid="enterFullscreenButton"], button[data-testid="exitFullscreenButton"], button[aria-label*="fullscreen" i], button[title*="fullscreen" i]'
+        );
+        const closeBtn = document.querySelector(
+            'button[data-testid="playerControlsCloseButton"], button[data-testid="closeButton"], button[aria-label*="close" i]'
+        );
+        const settingsBtn = document.querySelector(
+            'button[data-testid="playerSettingsButton"], button[data-testid*="settings" i]'
+        );
+        const anchorBtn = fullscreenBtn || closeBtn || settingsBtn;
+        if (!anchorBtn || !anchorBtn.parentElement) return;
+
+        const parent = anchorBtn.parentElement;
+        const pipBtn = document.createElement('button');
+        pipBtn.type = 'button';
+        pipBtn.className = `plex-enhanced-pip-btn ${anchorBtn.className}`;
+        pipBtn.innerHTML = PIP_ICON_SVG;
+        pipBtn.dataset.plexPipBound = 'true';
+
+        updatePipButtonState(pipBtn, active);
+
+        pipBtn.addEventListener('click', async e => {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            const v = getVideo();
+            if (v) await togglePictureInPicture(v);
+        }, true);
+
+        // Place PiP right before fullscreen button, or before close button, or at the end
+        if (fullscreenBtn && fullscreenBtn.parentElement === parent) {
+            parent.insertBefore(pipBtn, fullscreenBtn);
+        } else if (closeBtn && closeBtn.parentElement === parent) {
+            parent.insertBefore(pipBtn, closeBtn);
+        } else {
+            parent.appendChild(pipBtn);
+        }
+    }
+
+    // PiP lifecycle event handlers for instant UI and OSD synchronization
+    function handlePipEnter() {
+        console.log('[Plex Enhanced Player] Entered Picture-in-Picture mode.');
+        const pipBtn = document.querySelector('.plex-enhanced-pip-btn');
+        if (pipBtn) updatePipButtonState(pipBtn, true);
+        showActionOsd({
+            iconSvg: PIP_ICON_SVG,
+            title: 'Picture-in-Picture',
+            badge: 'ACTIVE',
+            subtitle: 'Playing in floating mini-player (Press P to exit)',
+            isOriginal: false
+        });
+    }
+
+    function handlePipLeave() {
+        console.log('[Plex Enhanced Player] Exited Picture-in-Picture mode.');
+        const pipBtn = document.querySelector('.plex-enhanced-pip-btn');
+        if (pipBtn) updatePipButtonState(pipBtn, false);
+        showActionOsd({
+            iconSvg: PIP_ICON_SVG,
+            title: 'Picture-in-Picture',
+            badge: 'CLOSED',
+            subtitle: 'Restored to main player',
+            isOriginal: true
+        });
+        setTimeout(reapplyCrop, 60);
+    }
+
+    /* ==========================================================================
        KEYBOARD SHORTCUTS HANDLER
        ========================================================================== */
 
-    // Keyboard shortcuts handler ('C' crop, arrows 5s skip, '[' / ']' speed)
+    // Keyboard shortcuts handler ('C' crop, arrows 5s skip, '[' / ']' speed, 'P' PiP)
     function handleKeyDown(e) {
         if (shouldIgnoreKeyboardEvent(e)) return;
         if (e.altKey || e.ctrlKey || e.metaKey) return;
@@ -673,6 +837,13 @@
             if (isMiniPlayer(v)) return;
             e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
             cycleCrop(e.shiftKey ? -1 : 1, v);
+            return;
+        }
+
+        // 'P' : Toggle Picture-in-Picture
+        if ((key === 'p' || key === 'P' || code === 'KeyP') && !e.shiftKey) {
+            e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+            togglePictureInPicture(v);
             return;
         }
 
@@ -717,6 +888,7 @@
             domUpdateScheduled = false;
             try {
                 patchSkipButtons();
+                patchPipButton();
 
                 const v = getVideo();
                 if (v && !isMiniPlayer(v)) ensureBlackBackground(v);
@@ -730,6 +902,19 @@
 
     // Capturing keydown listener to preempt native Plex hotkey handlers
     document.addEventListener('keydown', handleKeyDown, true);
+
+    // Picture-in-Picture enter and exit observers
+    document.addEventListener('enterpictureinpicture', handlePipEnter, true);
+    document.addEventListener('leavepictureinpicture', handlePipLeave, true);
+    document.addEventListener('webkitpresentationmodechanged', e => {
+        if (e.target && e.target.tagName === 'VIDEO') {
+            if (e.target.webkitPresentationMode === 'picture-in-picture') {
+                handlePipEnter();
+            } else {
+                handlePipLeave();
+            }
+        }
+    }, true);
 
     // Re-calculates and re-applies crop transformation whenever viewport size changes
     const reapplyCrop = () => {
@@ -767,5 +952,5 @@
     // Initial run on script injection
     handleDomUpdate();
 
-    console.log('[Plex Enhanced Player] Script v6.0 loaded.');
+    console.log('[Plex Enhanced Player] Script v6.1 loaded.');
 })();

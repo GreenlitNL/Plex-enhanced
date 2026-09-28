@@ -1,6 +1,6 @@
 # Plex: Enhanced Player
 
-All-in-one web player enhancement userscript for Plex Web (`app.plex.tv`, local PMS servers, and `*.plex.direct`). Adds aspect-ratio cropping presets, true cinema-black backdrop, instant 5-second skips with native UI integration, smooth playback speed adjustments, and a persistent on-screen display (OSD) HUD.
+All-in-one web player enhancement userscript for Plex Web (`app.plex.tv`, local PMS servers, and `*.plex.direct`). Adds aspect-ratio cropping presets, true cinema-black backdrop, instant 5-second skips with native UI integration, smooth playback speed adjustments, Picture-in-Picture mode, and a persistent on-screen display (OSD) HUD.
 
 ---
 
@@ -29,6 +29,12 @@ Cycle through custom aspect ratio presets to eliminate black bars on ultrawide m
 - **IMAX** (1.43:1 full frame)
 - **Fill Screen** (Stretch to fill)
 
+### 🪟 Picture-in-Picture (PiP)
+- Pop any video out into a resizable, floating Picture-in-Picture window that stays on top of other applications.
+- Seamlessly toggle via the dedicated **PiP button** injected directly into Plex's playback control bar, or hit <kbd>P</kbd>.
+- Full lifecycle synchronization: automatically syncs button active state and triggers animated OSD toasts when entering or exiting PiP.
+- Automatic crop preservation: returns cleanly to your active aspect ratio preset when leaving PiP.
+
 ### ⏩ 5-Second Forward & Backward Skip
 - Replaces native skip behavior with snappy **5-second** jumps forward and backward.
 - Dynamically injects native-styled geometric `5` icons matching Plex's design system into the player bar.
@@ -51,6 +57,7 @@ Cycle through custom aspect ratio presets to eliminate black bars on ultrawide m
 | Shortcut | Action | Description |
 | :--- | :--- | :--- |
 | <kbd>C</kbd> | **Cycle Crop Preset** | Cycles through 16:9, 21:9, 2.35:1, 2.39:1, 1.85:1, 2.00:1, 16:10, IMAX, Fill, and Original |
+| <kbd>P</kbd> | **Picture-in-Picture** | Toggles native floating Picture-in-Picture window |
 | <kbd>→</kbd> | **Skip Forward 5s** | Jumps ahead 5 seconds with an animated on-screen badge |
 | <kbd>←</kbd> | **Skip Backward 5s** | Jumps back 5 seconds with an animated on-screen badge |
 | <kbd>]</kbd> | **Increase Speed** | Increases playback speed (`0.5x` – `2.0x`) |
