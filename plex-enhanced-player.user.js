@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plex: Enhanced Player (Video Crop, 5s Skip Forward & Backward, Speed Control, PiP)
 // @namespace    https://github.com/GreenlitNL/Plex-enhanced
-// @version      6.2.0
+// @version      6.2.1
 // @description  All-in-one player enhancements for Plex Web: aspect ratio crop ('C' key), cinema black theater backdrop (no white bars), 5s skip forward & backward ('ArrowRight'/'ArrowLeft' + matching '5' icons), playback speed controls ('[' and ']'), Picture-in-Picture ('P' key + player bar button), and persistent dual-setting player status HUD ('I' key)
 // @author       GreenlitNL
 // @match        *://app.plex.tv/*
@@ -76,9 +76,12 @@
         </svg>
     `;
 
+    // Picture-in-Picture vector glyph matching native Chroma icon geometry
+    const PIP_ICON_PATH = 'M3.75 4.5A1.75 1.75 0 0 0 2 6.25v11.5c0 .966.784 1.75 1.75 1.75h16.5A1.75 1.75 0 0 0 22 17.75V6.25A1.75 1.75 0 0 0 20.25 4.5H3.75zM4 6.5h16v11H4V6.5zm7 4.25a.75.75 0 0 1 .75-.75h6.5a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-.75.75h-6.5a.75.75 0 0 1-.75-.75v-5z';
+
     const PIP_ICON_SVG = `
         <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" style="vertical-align: middle;">
-            <path fill-rule="evenodd" clip-rule="evenodd" d="M3.75 4.5A1.75 1.75 0 0 0 2 6.25v11.5c0 .966.784 1.75 1.75 1.75h16.5A1.75 1.75 0 0 0 22 17.75V6.25A1.75 1.75 0 0 0 20.25 4.5H3.75zM4 6.5h16v11H4V6.5zm7 4.25a.75.75 0 0 1 .75-.75h6.5a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-.75.75h-6.5a.75.75 0 0 1-.75-.75v-5z"></path>
+            <path fill-rule="evenodd" clip-rule="evenodd" d="${PIP_ICON_PATH}"></path>
         </svg>
     `;
 
@@ -340,7 +343,6 @@
     // Displays the transient action toast HUD (auto-dismisses after 3s, suppressed if status HUD is visible)
     function showActionOsd({ iconSvg, title, badge, subtitle, isOriginal }) {
         if (isStatusOsdVisible()) return;
-        ensureStyles();
 
         if (!actionOsdEl || !actionOsdEl.isConnected) actionOsdEl = document.createElement('div');
         attachToOsdParent(actionOsdEl);
@@ -405,7 +407,6 @@
     // Toggles the persistent Player Status HUD on or off ('I' hotkey)
     function toggleStatusOsd() {
         if (!getVideo()) return;
-        ensureStyles();
 
         if (!statusOsdEl || !statusOsdEl.isConnected) {
             statusOsdEl = document.createElement('div');
@@ -447,7 +448,6 @@
         const video = getVideo();
         if (!video) return;
 
-        ensureStyles();
         if (isMiniPlayer(video)) {
             video.style.transform = '';
             video.style.clipPath = '';
@@ -564,6 +564,9 @@
 
     // Patches native Plex skip button with 5s icon, localized tooltips, and click interceptor
     function patchSkipButton(btn, isForward) {
+        if (btn.dataset.plexSkip5Bound === 'true') return;
+        btn.dataset.plexSkip5Bound = 'true';
+
         const delta = isForward ? SKIP_SECONDS : -SKIP_SECONDS;
         const iconSvg = isForward ? SKIP_FWD_5_SVG_INNER : SKIP_BACK_5_SVG_INNER;
         const defaultText = isForward ? 'Forward 5s' : 'Backward 5s';
@@ -588,17 +591,14 @@
             svg.dataset.plexIcon5 = 'true';
         }
 
-        if (btn.dataset.plexSkip5Bound !== 'true') {
-            btn.dataset.plexSkip5Bound = 'true';
-            const prevent = e => { e.stopPropagation(); e.stopImmediatePropagation(); };
-            btn.addEventListener('pointerdown', prevent, true);
-            btn.addEventListener('mousedown', prevent, true);
-            btn.addEventListener('click', e => {
-                prevent(e);
-                e.preventDefault();
-                applyCustomSkip('button', delta);
-            }, true);
-        }
+        const prevent = e => { e.stopPropagation(); e.stopImmediatePropagation(); };
+        btn.addEventListener('pointerdown', prevent, true);
+        btn.addEventListener('mousedown', prevent, true);
+        btn.addEventListener('click', e => {
+            prevent(e);
+            e.preventDefault();
+            applyCustomSkip('button', delta);
+        }, true);
     }
 
     // Finds and patches all forward and backward skip buttons in the DOM
@@ -689,7 +689,7 @@
 
         return `
             <svg viewBox="0 0 24 24" width="${width}" height="${height}" fill="currentColor"${clsAttr} style="display: block; vertical-align: middle;">
-                <path fill-rule="evenodd" clip-rule="evenodd" d="M3.75 4.5A1.75 1.75 0 0 0 2 6.25v11.5c0 .966.784 1.75 1.75 1.75h16.5A1.75 1.75 0 0 0 22 17.75V6.25A1.75 1.75 0 0 0 20.25 4.5H3.75zM4 6.5h16v11H4V6.5zm7 4.25a.75.75 0 0 1 .75-.75h6.5a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-.75.75h-6.5a.75.75 0 0 1-.75-.75v-5z"></path>
+                <path fill-rule="evenodd" clip-rule="evenodd" d="${PIP_ICON_PATH}"></path>
             </svg>
         `.trim();
     }
@@ -746,56 +746,24 @@
         }
     }
 
+    // Prioritized list of anchor button selectors in Plex's playback control bar
+    const PIP_ANCHOR_SELECTORS = [
+        'button[data-testid*="repeat" i], button[aria-label*="repeat" i], button[aria-label*="herhaal" i], button[title*="repeat" i], button[title*="herhaal" i]',
+        'button[data-testid*="shuffle" i], button[aria-label*="shuffle" i], button[aria-label*="willekeurig" i], button[title*="shuffle" i], button[title*="willekeurig" i]',
+        'button[data-testid="streamsButton"], button[data-testid*="streams" i], button[data-testid*="subtitles" i], button[aria-label*="streams" i], button[aria-label*="subtitles" i], button[aria-label*="audio" i]',
+        'button[data-testid="playerSettingsButton"], button[data-testid*="settings" i], button[aria-label*="settings" i], button[aria-label*="instelling" i]',
+        'button[data-testid="enterFullscreenButton"], button[data-testid="exitFullscreenButton"], button[aria-label*="fullscreen" i], button[title*="fullscreen" i]',
+        'button[data-testid="playerControlsCloseButton"], button[data-testid="closeButton"], button[aria-label*="close" i]'
+    ];
+
     // Resolves the best anchor button in the playback control bar (prioritizing the repeat button)
     function findPipAnchor() {
-        // Priority 1: Repeat button in the right controls row (places PiP immediately to the left of repeat)
-        const repeatBtn = document.querySelector(
-            'button[data-testid*="repeat" i], button[aria-label*="repeat" i], button[aria-label*="herhaal" i], button[title*="repeat" i], button[title*="herhaal" i]'
-        );
-        if (repeatBtn && repeatBtn.parentElement) {
-            return { anchor: repeatBtn, insertBefore: true };
+        for (const selector of PIP_ANCHOR_SELECTORS) {
+            const anchor = document.querySelector(selector);
+            if (anchor && anchor.parentElement) {
+                return { anchor, insertBefore: true };
+            }
         }
-
-        // Priority 2: Shuffle button in that same options row
-        const shuffleBtn = document.querySelector(
-            'button[data-testid*="shuffle" i], button[aria-label*="shuffle" i], button[aria-label*="willekeurig" i], button[title*="shuffle" i], button[title*="willekeurig" i]'
-        );
-        if (shuffleBtn && shuffleBtn.parentElement) {
-            return { anchor: shuffleBtn, insertBefore: true };
-        }
-
-        // Priority 3: Streams / Audio & Subtitles button
-        const streamsBtn = document.querySelector(
-            'button[data-testid="streamsButton"], button[data-testid*="streams" i], button[data-testid*="subtitles" i], button[aria-label*="streams" i], button[aria-label*="subtitles" i], button[aria-label*="audio" i]'
-        );
-        if (streamsBtn && streamsBtn.parentElement) {
-            return { anchor: streamsBtn, insertBefore: true };
-        }
-
-        // Priority 4: Settings button
-        const settingsBtn = document.querySelector(
-            'button[data-testid="playerSettingsButton"], button[data-testid*="settings" i], button[aria-label*="settings" i], button[aria-label*="instelling" i]'
-        );
-        if (settingsBtn && settingsBtn.parentElement) {
-            return { anchor: settingsBtn, insertBefore: true };
-        }
-
-        // Priority 5: Fullscreen button
-        const fullscreenBtn = document.querySelector(
-            'button[data-testid="enterFullscreenButton"], button[data-testid="exitFullscreenButton"], button[aria-label*="fullscreen" i], button[title*="fullscreen" i]'
-        );
-        if (fullscreenBtn && fullscreenBtn.parentElement) {
-            return { anchor: fullscreenBtn, insertBefore: true };
-        }
-
-        // Priority 6: Close button
-        const closeBtn = document.querySelector(
-            'button[data-testid="playerControlsCloseButton"], button[data-testid="closeButton"], button[aria-label*="close" i]'
-        );
-        if (closeBtn && closeBtn.parentElement) {
-            return { anchor: closeBtn, insertBefore: true };
-        }
-
         return null;
     }
 
@@ -943,6 +911,7 @@
 
     // Throttled DOM update loop to keep buttons and theater backdrop patched
     function handleDomUpdate() {
+        ensureStyles();
         if (domUpdateScheduled) return;
         domUpdateScheduled = true;
 
@@ -1005,14 +974,22 @@
             syncVideoSpeed();
         }
     }, true);
+    document.addEventListener('playing', e => {
+        if (e.target && e.target.tagName === 'VIDEO') {
+            syncVideoSpeed();
+        }
+    }, true);
+    document.addEventListener('ratechange', e => {
+        if (e.target && e.target.tagName === 'VIDEO') {
+            syncVideoSpeed();
+        }
+    }, true);
 
     // MutationObserver watches for Plex SPA page navigations and control-bar re-renders
     new MutationObserver(handleDomUpdate).observe(document.documentElement, { childList: true, subtree: true });
-    // Periodic fallback to guarantee playback speed stays locked
-    setInterval(syncVideoSpeed, 1500);
 
     // Initial run on script injection
     handleDomUpdate();
 
-    console.log('[Plex Enhanced Player] Script v6.2 loaded.');
+    console.log('[Plex Enhanced Player] Script v6.2.1 loaded.');
 })();
