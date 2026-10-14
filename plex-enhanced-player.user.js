@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Plex: Enhanced Player (Video Crop, 5s Skip Forward & Backward, Speed Control, PiP)
 // @namespace    https://github.com/GreenlitNL/Plex-enhanced
-// @version      6.2.1
-// @description  All-in-one player enhancements for Plex Web: aspect ratio crop ('C' key), cinema black theater backdrop (no white bars), 5s skip forward & backward ('ArrowRight'/'ArrowLeft' + matching '5' icons), playback speed controls ('[' and ']'), Picture-in-Picture ('P' key + player bar button), and persistent dual-setting player status HUD ('I' key)
+// @version      6.3.0
+// @description  All-in-one player enhancements for Plex Web & Cinecat: aspect ratio crop ('C' key), cinema black theater backdrop (no white bars), 5s skip forward & backward ('ArrowRight'/'ArrowLeft' + matching '5' icons on Plex), playback speed controls ('[' and ']'), Picture-in-Picture ('P' key + player bar button), and persistent dual-setting player status HUD ('I' key)
 // @author       GreenlitNL
 // @match        *://app.plex.tv/*
 // @match        *://*.plex.tv/*
@@ -12,6 +12,8 @@
 // @match        *://10.*:32400/web/*
 // @match        *://172.16.*:32400/web/*
 // @match        *://*.plex.direct:32400/web/*
+// @match        *://cinecat.eu/*
+// @match        *://*.cinecat.eu/*
 // @updateURL    https://raw.githubusercontent.com/GreenlitNL/Plex-enhanced/main/plex-enhanced-player.user.js
 // @downloadURL  https://raw.githubusercontent.com/GreenlitNL/Plex-enhanced/main/plex-enhanced-player.user.js
 // @grant        none
@@ -80,14 +82,19 @@
     const PIP_ICON_PATH = 'M3.75 4.5A1.75 1.75 0 0 0 2 6.25v11.5c0 .966.784 1.75 1.75 1.75h16.5A1.75 1.75 0 0 0 22 17.75V6.25A1.75 1.75 0 0 0 20.25 4.5H3.75zM4 6.5h16v11H4V6.5zm7 4.25a.75.75 0 0 1 .75-.75h6.5a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-.75.75h-6.5a.75.75 0 0 1-.75-.75v-5z';
 
     const PIP_ICON_SVG = `
-        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" style="vertical-align: middle;">
-            <path fill-rule="evenodd" clip-rule="evenodd" d="${PIP_ICON_PATH}"></path>
+        <svg viewBox="0 0 48 48" width="22" height="22" fill="currentColor" style="vertical-align: middle;">
+            <path fill-rule="evenodd" clip-rule="evenodd" transform="matrix(2.25 0 0 2.25 -3 -3)" d="${PIP_ICON_PATH}"></path>
         </svg>
     `;
 
     /* ==========================================================================
        STATE MANAGEMENT
        ========================================================================== */
+
+    // Environment detection: checks whether running in native Plex Web or third-party (e.g. Cinecat)
+    const isPlex = location.hostname.includes('plex.tv') ||
+                   location.hostname.includes('plex.direct') ||
+                   location.port === '32400';
 
     let currentModeIndex = 0;       // Pointer to currently active preset in CROP_MODES
     let currentSpeed = 1.0;         // Target playback rate maintained across buffer underruns
@@ -101,32 +108,43 @@
        DOM & VIDEO DISCOVERY HELPERS
        ========================================================================== */
 
-    // Finds the primary active video element (checks Plex player containers first)
+    // Finds the primary active video element (checks Plex player containers first if on Plex)
     function getVideo() {
-        const container = document.querySelector(
-            '[class*="Player-videoContainer"], [class*="HTML5VideoPlayer"], [class*="Player-player"], [class*="VideoContainer"]'
-        );
-        if (container) {
-            const v = container.querySelector('video');
-            if (v && v.isConnected) return v;
+        if (isPlex) {
+            const container = document.querySelector(
+                '[class*="Player-videoContainer"], [class*="HTML5VideoPlayer"], [class*="Player-player"], [class*="VideoContainer"]'
+            );
+            if (container) {
+                const v = container.querySelector('video');
+                if (v && v.isConnected) return v;
+            }
         }
         const videos = Array.from(document.querySelectorAll('video')).filter(v => v.isConnected);
         if (!videos.length) return null;
-        return videos.find(v => v.readyState >= 1 && !v.paused) || videos[videos.length - 1];
+        // Prioritize currently playing or ready video that has real rendered dimensions
+        return videos.find(v => v.readyState >= 1 && !v.paused && v.offsetWidth > 0) ||
+               videos.find(v => v.offsetWidth > 0 && v.videoWidth > 0) ||
+               videos.find(v => v.readyState >= 1) ||
+               videos[videos.length - 1];
     }
 
     // Checks if video is in Plex's corner mini-player
     function isMiniPlayer(video) {
-        return Boolean(video && video.closest('[class*="Player-miniPlayerContainer"]'));
+        return Boolean(isPlex && video && video.closest('[class*="Player-miniPlayerContainer"]'));
     }
 
     // Resolves the layout container used for sizing and clipping bounds
     function getContainer(video) {
         if (!video) return null;
+        const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+        if (fsEl && fsEl.contains(video)) return fsEl;
+
         return video.closest('[class*="Player-videoContainer"]') ||
                video.closest('[class*="HTML5VideoPlayer"]') ||
                video.closest('[class*="VideoContainer"]') ||
                video.closest('[class*="Player-player"]') ||
+               video.closest('[class*="player" i]') ||
+               video.closest('[class*="Player" i]') ||
                video.parentElement ||
                document.body;
     }
@@ -292,18 +310,24 @@
         if (!video || isMiniPlayer(video)) return;
         try {
             video.style.setProperty('background', '#000000', 'important');
-            let el = video.parentElement;
-            let depth = 0;
-            while (el && el !== document.body && depth < 8) {
-                const cls = (typeof el.className === 'string' ? el.className : '').toLowerCase();
-                const tid = (el.getAttribute('data-testid') || '').toLowerCase();
-                if (cls.includes('control') || cls.includes('bar') || tid.includes('control') || tid.includes('bar')) break;
+            const container = getContainer(video);
+            if (container && container !== document.body) {
+                container.style.setProperty('background', '#000000', 'important');
+            }
+            if (isPlex) {
+                let el = video.parentElement;
+                let depth = 0;
+                while (el && el !== document.body && depth < 8) {
+                    const cls = (typeof el.className === 'string' ? el.className : '').toLowerCase();
+                    const tid = (el.getAttribute('data-testid') || '').toLowerCase();
+                    if (cls.includes('control') || cls.includes('bar') || tid.includes('control') || tid.includes('bar')) break;
 
-                const hasControls = el.querySelector('[class*="BottomBar"], [class*="PlayerControls"], [data-testid="playerControlsContainer"]');
-                el.style.setProperty('background', '#000000', 'important');
-                if (hasControls) break;
-                el = el.parentElement;
-                depth++;
+                    const hasControls = el.querySelector('[class*="BottomBar"], [class*="PlayerControls"], [data-testid="playerControlsContainer"]');
+                    el.style.setProperty('background', '#000000', 'important');
+                    if (hasControls) break;
+                    el = el.parentElement;
+                    depth++;
+                }
             }
         } catch (e) {}
     }
@@ -679,17 +703,20 @@
         );
     }
 
-    // Generates an SVG string matching the exact Chroma icon classes and dimensions of the sibling buttons
+    // Generates an SVG string matching the exact Chroma icon classes, 48x48 viewBox, and dimensions of the sibling buttons
     function getPipButtonInnerSvg(referenceBtn) {
         const refSvg = referenceBtn ? referenceBtn.querySelector('svg') : null;
         const cls = refSvg ? (refSvg.getAttribute('class') || '') : '';
-        const width = refSvg ? (refSvg.getAttribute('width') || '20') : '20';
-        const height = refSvg ? (refSvg.getAttribute('height') || '20') : '20';
+        const width = refSvg ? (refSvg.getAttribute('width') || '48') : '48';
+        const height = refSvg ? (refSvg.getAttribute('height') || '48') : '48';
+        const viewBox = refSvg ? (refSvg.getAttribute('viewBox') || '0 0 48 48') : '0 0 48 48';
         const clsAttr = cls ? ` class="${cls}"` : '';
 
+        // Scale factor 2.25 inside 48x48 coordinate space expands the widescreen rectangle
+        // from (W=15.0px, H=11.25px) to (W=16.88px, H=12.66px), matching the optical visual weight of the neighboring icons
         return `
-            <svg viewBox="0 0 24 24" width="${width}" height="${height}" fill="currentColor"${clsAttr} style="display: block; vertical-align: middle;">
-                <path fill-rule="evenodd" clip-rule="evenodd" d="${PIP_ICON_PATH}"></path>
+            <svg viewBox="${viewBox}" width="${width}" height="${height}" fill="currentColor" aria-hidden="true"${clsAttr} style="display: block; vertical-align: middle;">
+                <path fill-rule="evenodd" clip-rule="evenodd" transform="matrix(2.25 0 0 2.25 -3 -3)" d="${PIP_ICON_PATH}"></path>
             </svg>
         `.trim();
     }
@@ -788,6 +815,7 @@
             pipBtn.className = `plex-enhanced-pip-btn ${anchor.className}`;
             pipBtn.innerHTML = getPipButtonInnerSvg(anchor);
             pipBtn.dataset.plexPipBound = 'true';
+            pipBtn.dataset.plexPipVersion = '2';
 
             pipBtn.addEventListener('click', async e => {
                 e.preventDefault();
@@ -803,6 +831,11 @@
                 parent.appendChild(pipBtn);
             }
         } else {
+            // Refresh SVG glyph if version is outdated
+            if (pipBtn.dataset.plexPipVersion !== '2') {
+                pipBtn.innerHTML = getPipButtonInnerSvg(anchor);
+                pipBtn.dataset.plexPipVersion = '2';
+            }
             // Keep PiP button located directly to the left of the anchor in the row
             if (insertBefore && (pipBtn.parentElement !== parent || pipBtn.nextElementSibling !== anchor)) {
                 parent.insertBefore(pipBtn, anchor);
@@ -918,8 +951,10 @@
         requestAnimationFrame(() => {
             domUpdateScheduled = false;
             try {
-                patchSkipButtons();
-                patchPipButton();
+                if (isPlex) {
+                    patchSkipButtons();
+                    patchPipButton();
+                }
 
                 const v = getVideo();
                 if (v && !isMiniPlayer(v)) ensureBlackBackground(v);
