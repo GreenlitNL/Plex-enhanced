@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Plex: Enhanced Player (Video Crop, 5s Skip Forward & Backward, Speed Control, PiP)
 // @namespace    https://github.com/GreenlitNL/Plex-enhanced
-// @version      6.3.0
-// @description  All-in-one player enhancements for Plex Web & Cinecat: aspect ratio crop ('C' key), cinema black theater backdrop (no white bars), 5s skip forward & backward ('ArrowRight'/'ArrowLeft' + matching '5' icons on Plex), playback speed controls ('[' and ']'), Picture-in-Picture ('P' key + player bar button), and persistent dual-setting player status HUD ('I' key)
+// @version      6.4.0
+// @description  All-in-one player enhancements for Plex Web & Cinecat: aspect ratio crop ('C' key), cinema black theater backdrop (no white bars), 5s skip forward & backward ('ArrowRight'/'ArrowLeft' + matching '5' icons on Plex), playback speed controls ('[' and ']'), Picture-in-Picture with live subtitle mirroring ('P' key + player bar button), and persistent dual-setting player status HUD ('I' key)
 // @author       GreenlitNL
 // @match        *://app.plex.tv/*
 // @match        *://*.plex.tv/*
@@ -103,13 +103,26 @@
     let statusOsdEl = null;         // Singleton DOM element for persistent player status HUD
     let lastSkipTime = 0;           // Timestamp of last skip event for rate-limiting
     let domUpdateScheduled = false; // Flag to throttle DOM mutations via requestAnimationFrame
+    let activePipWindow = null;     // Reference to active Document Picture-in-Picture window
+    let pipVideoPlaceholder = null; // Placeholder DOM marker where video was in host page
+    let pipMovedVideo = null;       // Reference to video element moved into PiP
+    let pipSubtitleSyncObserver = null; // MutationObserver watching for live subtitle text
+    let lastPipSubtitleText = '';   // Last mirrored subtitle text to avoid redundant DOM updates
+    let isRestoringPip = false;     // Guard flag to prevent re-entrant restore execution
 
     /* ==========================================================================
        DOM & VIDEO DISCOVERY HELPERS
        ========================================================================== */
 
-    // Finds the primary active video element (checks Plex player containers first if on Plex)
+    // Finds the primary active video element (checks Document PiP window first, then host page)
     function getVideo() {
+        if (activePipWindow && !activePipWindow.closed) {
+            try {
+                const pipVideo = activePipWindow.document.querySelector('video');
+                if (pipVideo && pipVideo.isConnected) return pipVideo;
+            } catch (e) {}
+        }
+
         if (isPlex) {
             const container = document.querySelector(
                 '[class*="Player-videoContainer"], [class*="HTML5VideoPlayer"], [class*="Player-player"], [class*="VideoContainer"]'
@@ -119,6 +132,11 @@
                 if (v && v.isConnected) return v;
             }
         }
+
+        // Cinecat main player video element has id="video-element"
+        const cinecatVideo = document.getElementById('video-element');
+        if (cinecatVideo && cinecatVideo.isConnected) return cinecatVideo;
+
         const videos = Array.from(document.querySelectorAll('video')).filter(v => v.isConnected);
         if (!videos.length) return null;
         // Prioritize currently playing or ready video that has real rendered dimensions
@@ -136,6 +154,13 @@
     // Resolves the layout container used for sizing and clipping bounds
     function getContainer(video) {
         if (!video) return null;
+        if (activePipWindow && !activePipWindow.closed) {
+            try {
+                const pipWrapper = activePipWindow.document.getElementById('plex-pip-wrapper');
+                if (pipWrapper) return pipWrapper;
+            } catch (e) {}
+        }
+
         const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
         if (fsEl && fsEl.contains(video)) return fsEl;
 
@@ -151,7 +176,7 @@
 
     // Ignores hotkeys when typing in search, inputs, or sliders
     function shouldIgnoreKeyboardEvent(e) {
-        const el = document.activeElement || e.target;
+        const el = (e.target && e.target.ownerDocument !== document ? e.target : document.activeElement) || e.target;
         if (!el) return false;
         const tag = (el.tagName || '').toLowerCase();
         const role = (el.getAttribute('role') || '').toLowerCase();
@@ -691,16 +716,335 @@
     }
 
     /* ==========================================================================
-       MODULE 4: PICTURE-IN-PICTURE (PIP)
+       MODULE 4: PICTURE-IN-PICTURE (PIP) WITH LIVE SUBTITLE MIRRORING
        ========================================================================== */
 
-    // Checks if video is currently displaying in Picture-in-Picture mode
+    // Checks if video is currently displaying in Picture-in-Picture mode (Document PiP or native PiP)
     function isPipActive(video = getVideo()) {
+        if (activePipWindow && !activePipWindow.closed) return true;
         if (!video) return false;
         return Boolean(
             document.pictureInPictureElement === video ||
             (video.webkitPresentationMode && video.webkitPresentationMode === 'picture-in-picture')
         );
+    }
+
+    // Extracts clean subtitle text from DOM or active textTracks across Plex & Cinecat
+    function extractSubtitleText() {
+        // 1. Cinecat DOM Subtitles (Movie-web React player: p.rounded.text-center or div.pointer-events-none.z-50 p)
+        const cinecatParagraphs = document.querySelectorAll(
+            'div[class*="pointer-events-none"][class*="z-50"] p, p[class*="rounded"][class*="text-center"], div[class*="flex-col"][class*="items-center"] p'
+        );
+        if (cinecatParagraphs.length > 0) {
+            const lines = Array.from(cinecatParagraphs)
+                .map(p => (p.innerText || p.textContent || '').trim())
+                .filter(Boolean);
+            if (lines.length > 0) return lines.join('\n');
+        }
+
+        // 1b. Cinecat TTML Subtitles (div.pointer-events-none.overflow-hidden span)
+        const cinecatTtml = document.querySelectorAll(
+            'div[class*="pointer-events-none"][class*="overflow-hidden"] span, div[class*="overflow-hidden"] span[class*="inline-block"]'
+        );
+        if (cinecatTtml.length > 0) {
+            const lines = Array.from(cinecatTtml)
+                .map(s => (s.innerText || s.textContent || '').trim())
+                .filter(Boolean);
+            if (lines.length > 0) return lines.join('\n');
+        }
+
+        // 1c. Artplayer / Generic video overlay
+        const artSub = document.querySelector('.art-subtitle, .art-subtitles, [class*="art-subtitle"]');
+        if (artSub) {
+            const text = (artSub.innerText || artSub.textContent || '').trim();
+            if (text) return text;
+        }
+
+        // 2. Plex DOM Subtitles
+        const plexContainers = document.querySelectorAll(
+            '[class*="Subtitles-container"], [class*="SubtitleRenderer"], [class*="PlayerVideoView-subtitles"], [class*="Subtitles-renderer"], [data-testid="subtitles-renderer"]'
+        );
+
+        for (const container of plexContainers) {
+            // Check for explicit renderer child if present (avoids font-measurement 'M' sibling entirely)
+            const renderer = container.querySelector('[class*="renderer" i], [class*="cue" i]');
+            if (renderer) {
+                const rRaw = (renderer.innerText || renderer.textContent || '').trim();
+                if (rRaw && rRaw !== 'M' && rRaw !== 'm') {
+                    const lines = rRaw.split('\n').map(l => l.trim()).filter(l => l.length > 0 && l !== 'M' && l !== 'm');
+                    if (lines.length > 0) return lines.join('\n');
+                }
+            }
+
+            // Fallback: clone container and strip any measurement elements
+            try {
+                const clone = container.cloneNode(true);
+                clone.querySelectorAll('[class*="measure" i]').forEach(el => el.remove());
+                const raw = (clone.innerText || clone.textContent || '').trim();
+                if (raw && raw !== 'M' && raw !== 'm') {
+                    const cleanedLines = raw.split('\n')
+                        .map(l => l.trim())
+                        .filter(l => l.length > 0 && l !== 'M' && l !== 'm');
+                    if (cleanedLines.length > 0) {
+                        return cleanedLines.join('\n');
+                    }
+                }
+            } catch (e) {}
+        }
+
+        // 3. Fallback: video textTracks (HTML5 native tracks / Cinecat native track setting)
+        const v = pipMovedVideo || getVideo();
+        if (v && v.textTracks && v.textTracks.length > 0) {
+            try {
+                for (let i = 0; i < v.textTracks.length; i++) {
+                    const track = v.textTracks[i];
+                    if (track.mode === 'disabled') {
+                        track.mode = 'hidden';
+                    }
+                    if (track.activeCues && track.activeCues.length > 0) {
+                        const cueLines = [];
+                        for (let j = 0; j < track.activeCues.length; j++) {
+                            const cText = (track.activeCues[j].text || '').trim();
+                            if (cText) cueLines.push(cText);
+                        }
+                        if (cueLines.length > 0) return cueLines.join('\n');
+                    }
+                }
+            } catch (e) {}
+        }
+
+        return '';
+    }
+
+    // Mirrors current subtitle text to the Document PiP window overlay
+    function syncPipSubtitles() {
+        if (!activePipWindow || activePipWindow.closed) return;
+        const subTextEl = activePipWindow.document.getElementById('plex-pip-subtitles-text');
+        if (!subTextEl) return;
+
+        const currentText = extractSubtitleText();
+        if (currentText === lastPipSubtitleText) return;
+        lastPipSubtitleText = currentText;
+
+        if (currentText) {
+            subTextEl.textContent = currentText;
+            subTextEl.classList.add('is-visible');
+        } else {
+            subTextEl.textContent = '';
+            subTextEl.classList.remove('is-visible');
+        }
+    }
+
+    // Opens Document Picture-in-Picture window with the video and live subtitle overlay
+    async function openDocumentPip(video) {
+        if (!video || !video.isConnected) return;
+        if (activePipWindow && !activePipWindow.closed) return;
+
+        const vw = video.videoWidth || 16;
+        const vh = video.videoHeight || 9;
+        const aspect = vw / vh;
+        const pipWidth = 560;
+        const pipHeight = Math.max(200, Math.round(pipWidth / aspect));
+
+        const pipWin = await window.documentPictureInPicture.requestWindow({
+            width: pipWidth,
+            height: pipHeight
+        });
+
+        pipWin.document.title = document.title || 'Plex: Enhanced Player';
+
+        const pipStyle = pipWin.document.createElement('style');
+        pipStyle.textContent = `
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+            html, body {
+                width: 100%;
+                height: 100%;
+                background: #000000;
+                overflow: hidden;
+                user-select: none;
+                -webkit-user-select: none;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            }
+            #plex-pip-wrapper {
+                position: relative;
+                width: 100%;
+                height: 100%;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                background: #000000;
+                overflow: hidden;
+                cursor: pointer;
+            }
+            video {
+                width: 100%;
+                height: 100%;
+                object-fit: contain;
+                background: #000000;
+                display: block;
+            }
+            #plex-pip-subtitles {
+                position: absolute;
+                bottom: 6%;
+                left: 4%;
+                right: 4%;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                pointer-events: none;
+                z-index: 1000;
+                text-align: center;
+            }
+            #plex-pip-subtitles-text {
+                display: none;
+                max-width: 92%;
+                color: #ffffff;
+                background: rgba(0, 0, 0, 0.78);
+                padding: 6px 14px;
+                border-radius: 6px;
+                font-size: clamp(14px, 3.2vw, 26px);
+                font-weight: 600;
+                line-height: 1.35;
+                letter-spacing: 0.2px;
+                text-shadow: 0 1px 2px rgba(0,0,0,0.95), 0 0 4px rgba(0,0,0,0.85);
+                white-space: pre-wrap;
+                word-break: break-word;
+            }
+            #plex-pip-subtitles-text.is-visible {
+                display: inline-block;
+            }
+        `;
+        pipWin.document.head.appendChild(pipStyle);
+
+        const wrapper = pipWin.document.createElement('div');
+        wrapper.id = 'plex-pip-wrapper';
+
+        const subContainer = pipWin.document.createElement('div');
+        subContainer.id = 'plex-pip-subtitles';
+
+        const subText = pipWin.document.createElement('div');
+        subText.id = 'plex-pip-subtitles-text';
+        subContainer.appendChild(subText);
+
+        const wasPaused = video.paused;
+
+        // Place invisible placeholder in host DOM before moving video to mark exact restoration location
+        pipVideoPlaceholder = document.createElement('div');
+        pipVideoPlaceholder.id = 'plex-enhanced-video-placeholder';
+        pipVideoPlaceholder.style.cssText = 'display:none!important;visibility:hidden!important;';
+        video.parentElement.insertBefore(pipVideoPlaceholder, video);
+
+        pipMovedVideo = video;
+        activePipWindow = pipWin;
+        lastPipSubtitleText = '';
+
+        wrapper.appendChild(video);
+        wrapper.appendChild(subContainer);
+        pipWin.document.body.appendChild(wrapper);
+
+        // Resume playback seamlessly if video was playing
+        if (!wasPaused && video.paused) {
+            video.play().catch(() => {});
+        }
+
+        // Apply aspect ratio crop in PiP if active
+        if (currentModeIndex !== 0) {
+            applyCrop(CROP_MODES[currentModeIndex]);
+        }
+
+        // Click on PiP window toggles play / pause
+        wrapper.addEventListener('click', e => {
+            e.preventDefault();
+            if (video.paused) {
+                video.play().catch(() => {});
+            } else {
+                video.pause();
+            }
+        });
+
+        // Forward keyboard events (Space / K for play/pause, hotkeys for skip, speed, crop, PiP toggle)
+        pipWin.addEventListener('keydown', e => {
+            if (e.code === 'Space' || e.key === ' ' || e.code === 'KeyK' || e.key === 'k') {
+                e.preventDefault();
+                e.stopPropagation();
+                if (video.paused) {
+                    video.play().catch(() => {});
+                } else {
+                    video.pause();
+                }
+                return;
+            }
+            handleKeyDown(e);
+        }, true);
+
+        // Reapply crop dynamically on PiP window resize
+        pipWin.addEventListener('resize', () => {
+            if (currentModeIndex !== 0) {
+                applyCrop(CROP_MODES[currentModeIndex]);
+            }
+        });
+
+        // Restore video to host document when PiP window closes
+        pipWin.addEventListener('pagehide', () => {
+            restoreFromDocumentPip();
+        });
+
+        // Initialize subtitle sync and observer
+        syncPipSubtitles();
+        video.addEventListener('timeupdate', syncPipSubtitles);
+
+        pipSubtitleSyncObserver = new MutationObserver(syncPipSubtitles);
+        pipSubtitleSyncObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+
+        handlePipEnter();
+    }
+
+    // Restores the video element back to its exact place in the host DOM
+    function restoreFromDocumentPip() {
+        if (isRestoringPip) return;
+        isRestoringPip = true;
+
+        if (pipSubtitleSyncObserver) {
+            pipSubtitleSyncObserver.disconnect();
+            pipSubtitleSyncObserver = null;
+        }
+
+        const video = pipMovedVideo;
+        if (video) {
+            video.removeEventListener('timeupdate', syncPipSubtitles);
+        }
+
+        const placeholder = pipVideoPlaceholder;
+        if (video && placeholder && placeholder.parentElement) {
+            const wasPaused = video.paused;
+            placeholder.parentElement.insertBefore(video, placeholder);
+            placeholder.remove();
+            if (!wasPaused && video.paused) {
+                video.play().catch(() => {});
+            }
+        } else if (video && !video.isConnected) {
+            const container = document.querySelector('[class*="Player-videoContainer"], [class*="HTML5VideoPlayer"]') || document.body;
+            container.appendChild(video);
+        }
+
+        const pipWin = activePipWindow;
+        activePipWindow = null;
+        pipVideoPlaceholder = null;
+        pipMovedVideo = null;
+        lastPipSubtitleText = '';
+
+        if (pipWin && !pipWin.closed) {
+            try {
+                pipWin.close();
+            } catch (e) {}
+        }
+
+        isRestoringPip = false;
+        handlePipLeave();
     }
 
     // Generates an SVG string matching the exact Chroma icon classes, 48x48 viewBox, and dimensions of the sibling buttons
@@ -738,12 +1082,37 @@
         }
     }
 
-    // Toggles browser native Picture-in-Picture
-    async function togglePictureInPicture(video = getVideo()) {
+    const nativeRequestPictureInPicture = typeof HTMLVideoElement !== 'undefined'
+        ? HTMLVideoElement.prototype.requestPictureInPicture
+        : null;
+
+    const nativeExitPictureInPicture = typeof document !== 'undefined'
+        ? document.exitPictureInPicture
+        : null;
+
+    // Toggles Picture-in-Picture (prefers Document PiP with live subtitles, falls back to native PiP, or forceNative via Shift+P)
+    async function togglePictureInPicture(video = getVideo(), forceNative = false) {
+        if (activePipWindow && !activePipWindow.closed) {
+            restoreFromDocumentPip();
+            return;
+        }
+
         if (!video) return;
 
+        // Try Document Picture-in-Picture API first (unless native PiP is explicitly forced via Shift+P)
+        if (!forceNative && 'documentPictureInPicture' in window && typeof window.documentPictureInPicture.requestWindow === 'function') {
+            try {
+                await openDocumentPip(video);
+                return;
+            } catch (err) {
+                console.warn('[Plex Enhanced Player] Document PiP failed, falling back to native PiP:', err);
+            }
+        }
+
+        // Fallback or explicit native video PiP
         const pipSupported = Boolean(
             document.pictureInPictureEnabled ||
+            nativeRequestPictureInPicture ||
             video.webkitSupportsPresentationMode
         );
 
@@ -761,7 +1130,13 @@
 
         try {
             if (document.pictureInPictureElement) {
-                await document.exitPictureInPicture();
+                if (typeof nativeExitPictureInPicture === 'function') {
+                    await nativeExitPictureInPicture.call(document);
+                } else if (typeof document.exitPictureInPicture === 'function') {
+                    await document.exitPictureInPicture();
+                }
+            } else if (typeof nativeRequestPictureInPicture === 'function') {
+                await nativeRequestPictureInPicture.call(video);
             } else if (typeof video.requestPictureInPicture === 'function') {
                 await video.requestPictureInPicture();
             } else if (video.webkitSupportsPresentationMode && typeof video.webkitSetPresentationMode === 'function') {
@@ -769,8 +1144,33 @@
                 video.webkitSetPresentationMode(mode);
             }
         } catch (err) {
-            console.warn('[Plex Enhanced Player] Picture-in-Picture toggle failed:', err);
+            console.warn('[Plex Enhanced Player] Native Picture-in-Picture toggle failed:', err);
         }
+    }
+
+    // Intercept native requestPictureInPicture so Cinecat on-screen PiP button routes through Document PiP
+    if (nativeRequestPictureInPicture) {
+        HTMLVideoElement.prototype.requestPictureInPicture = async function () {
+            if ('documentPictureInPicture' in window && typeof window.documentPictureInPicture.requestWindow === 'function') {
+                try {
+                    await openDocumentPip(this);
+                    return activePipWindow;
+                } catch (err) {
+                    console.warn('[Plex Enhanced Player] Document PiP intercept fallback:', err);
+                }
+            }
+            return nativeRequestPictureInPicture.apply(this, arguments);
+        };
+    }
+
+    if (nativeExitPictureInPicture) {
+        document.exitPictureInPicture = async function () {
+            if (activePipWindow && !activePipWindow.closed) {
+                restoreFromDocumentPip();
+                return;
+            }
+            return nativeExitPictureInPicture.apply(this, arguments);
+        };
     }
 
     // Prioritized list of anchor button selectors in Plex's playback control bar
@@ -854,7 +1254,7 @@
             iconSvg: PIP_ICON_SVG,
             title: 'Picture-in-Picture',
             badge: 'ACTIVE',
-            subtitle: 'Playing in floating mini-player (Press P to exit)',
+            subtitle: 'Playing in floating window with subtitles (Press P to exit)',
             isOriginal: false
         });
     }
@@ -903,10 +1303,10 @@
             return;
         }
 
-        // 'P' : Toggle Picture-in-Picture
-        if ((key === 'p' || key === 'P' || code === 'KeyP') && !e.shiftKey) {
+        // 'P' : Toggle Picture-in-Picture ('P' = Document PiP with live subtitles, 'Shift+P' = Frameless Native PiP)
+        if (key === 'p' || key === 'P' || code === 'KeyP') {
             e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
-            togglePictureInPicture(v);
+            togglePictureInPicture(v, e.shiftKey);
             return;
         }
 
@@ -1020,11 +1420,17 @@
         }
     }, true);
 
+    window.addEventListener('beforeunload', () => {
+        if (activePipWindow && !activePipWindow.closed) {
+            restoreFromDocumentPip();
+        }
+    });
+
     // MutationObserver watches for Plex SPA page navigations and control-bar re-renders
     new MutationObserver(handleDomUpdate).observe(document.documentElement, { childList: true, subtree: true });
 
     // Initial run on script injection
     handleDomUpdate();
 
-    console.log('[Plex Enhanced Player] Script v6.2.1 loaded.');
+    console.log('[Plex Enhanced Player] Script v6.4.0 loaded.');
 })();
