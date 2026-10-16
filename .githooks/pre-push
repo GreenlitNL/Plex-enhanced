@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Git pre-push hook: Prevents AI agents from pushing when local branch is behind remote releases
+
+# Only check when pushing to main
+while read -r local_ref local_oid remote_ref remote_oid; do
+  if [[ "$remote_ref" =~ /main$ ]]; then
+    # Fetch remote silently
+    if git fetch origin main --quiet --tags 2>/dev/null; then
+      REMOTE_HEAD=$(git rev-parse origin/main 2>/dev/null || echo "")
+      LOCAL_HEAD=$(git rev-parse HEAD 2>/dev/null || echo "")
+
+      if [ -n "$REMOTE_HEAD" ] && [ "$LOCAL_HEAD" != "$REMOTE_HEAD" ]; then
+        BEHIND_COUNT=$(git rev-list --count HEAD..origin/main 2>/dev/null || echo "0")
+        if [ "$BEHIND_COUNT" -gt 0 ]; then
+          echo ""
+          echo "================================================================================"
+          echo "❌ [Agent Hook Error] Cannot push: Local branch is behind origin/main by $BEHIND_COUNT commit(s)!"
+          echo "   (This usually happens when the GitHub release bot published a new version)"
+          echo "================================================================================"
+          echo "👉 REQUIRED AGENT ACTION:"
+          echo "   Run the following command before pushing:"
+          echo "     git pull --rebase origin main"
+          echo "================================================================================"
+          echo ""
+          exit 1
+        fi
+      fi
+    fi
+  fi
+done
+
+exit 0

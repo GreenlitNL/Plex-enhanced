@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Git commit-msg hook: Enforces Conventional Commits for AI Agents & Contributors
+
+COMMIT_MSG_FILE="$1"
+FIRST_LINE=$(head -n 1 "$COMMIT_MSG_FILE")
+
+# Allow Merge commits and automated release commits
+if [[ "$FIRST_LINE" =~ ^Merge ]] || [[ "$FIRST_LINE" =~ ^Revert ]] || [[ "$FIRST_LINE" =~ ^chore\(release\): ]]; then
+  exit 0
+fi
+
+# Conventional Commit pattern
+PATTERN="^(feat|fix|perf|revert|docs|style|chore|refactor|test|build|ci)(\([a-zA-Z0-9_.-]+\))?(!)?: .+$"
+
+if ! echo "$FIRST_LINE" | grep -Eq "$PATTERN"; then
+  echo ""
+  echo "================================================================================"
+  echo "❌ [Agent Hook Error] Commit message does NOT follow Conventional Commits!"
+  echo "   Current message: \"$FIRST_LINE\""
+  echo "================================================================================"
+  echo "👉 REQUIRED FORMAT: <type>(<optional-scope>): <description>"
+  echo "   Valid types:"
+  echo "     feat:     New feature (triggers MINOR release bump)"
+  echo "     fix:      Bug fix (triggers PATCH release bump)"
+  echo "     perf:     Performance improvement (triggers PATCH release bump)"
+  echo "     chore:    Maintenance/tooling update (no release triggered)"
+  echo "     docs:     Documentation only (no release triggered)"
+  echo "     refactor: Code change that neither fixes a bug nor adds a feature"
+  echo "     test:     Adding or correcting tests"
+  echo "     ci:       CI/CD changes"
+  echo "   For breaking changes, append ! before the colon, e.g.: feat!: new breaking API"
+  echo "================================================================================"
+  echo ""
+  exit 1
+fi
+
+exit 0
