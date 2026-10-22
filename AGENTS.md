@@ -4,6 +4,7 @@
 - **Production quality without over-engineering**: Write clean, maintainable, and reliable code for real users. Avoid speculative abstractions and unnecessary complexity.
 - **No band-aids or quick fixes**: Always solve problems at their root cause.
 - **Explicit consent required**: Never commit or push changes unless the user explicitly instructs you to do so.
+- **No unauthorized Computer Use**: NEVER initiate or execute GUI-level/visual Computer Use (taking screenshots to drive mouse coordinates and keystrokes) without explicit user permission and a clear upfront warning detailing the excessive token consumption, latency, and costs. Always prioritize programmatic alternatives (APIs, DOM/CDP inspection, DevTools MCP, or headless scripts) first.
 
 ## 2. Project Architecture & Quick Commands
 - **Stack**: Tampermonkey / Violentmonkey Userscript (Vanilla JavaScript).

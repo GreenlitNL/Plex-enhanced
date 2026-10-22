@@ -848,7 +848,8 @@
 
         const pipWin = await window.documentPictureInPicture.requestWindow({
             width: pipWidth,
-            height: pipHeight
+            height: pipHeight,
+            preferInitialWindowPlacement: true
         });
 
         pipWin.document.title = document.title || 'Plex: Enhanced Player';
