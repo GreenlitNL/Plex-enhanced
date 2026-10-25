@@ -1,3 +1,9 @@
+## [6.5.0](https://github.com/GreenlitNL/Plex-enhanced/releases/tag/v6.5.0) (2026-10-25)
+
+### Features
+
+* feat: add support for movy.sx
+
 ## [6.4.1](https://github.com/GreenlitNL/Plex-enhanced/releases/tag/v6.4.1) (2026-10-22)
 
 ### Bug Fixes

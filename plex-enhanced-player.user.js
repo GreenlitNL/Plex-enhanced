@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plex: Enhanced Player (Video Crop, 5s Skip Forward & Backward, Speed Control, PiP)
 // @namespace    https://github.com/GreenlitNL/Plex-enhanced
-// @version      6.4.1
+// @version      6.5.0
 // @description  All-in-one player enhancements for Plex Web & Cinecat: aspect ratio crop ('C' key), cinema black theater backdrop (no white bars), 5s skip forward & backward ('ArrowRight'/'ArrowLeft' + matching '5' icons on Plex), playback speed controls ('[' and ']'), Picture-in-Picture with live subtitle mirroring ('P' key + player bar button), and persistent dual-setting player status HUD ('I' key)
 // @author       GreenlitNL
 // @match        *://app.plex.tv/*
