@@ -14,6 +14,8 @@
 // @match        *://*.plex.direct:32400/web/*
 // @match        *://cinecat.eu/*
 // @match        *://*.cinecat.eu/*
+// @match        *://movy.sx/*
+// @match        *://*.movy.sx/*
 // @updateURL    https://raw.githubusercontent.com/GreenlitNL/Plex-enhanced/main/plex-enhanced-player.user.js
 // @downloadURL  https://raw.githubusercontent.com/GreenlitNL/Plex-enhanced/main/plex-enhanced-player.user.js
 // @grant        none

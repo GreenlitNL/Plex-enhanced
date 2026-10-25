@@ -75,6 +75,7 @@ Cycle through custom aspect ratio presets to eliminate black bars on ultrawide m
 - **LAN Subnets**: `http://192.168.*:32400/web/*`, `http://10.*:32400/web/*`, `http://172.16.*:32400/web/*`
 - **Plex Direct**: `https://*.plex.direct:32400/web/*`
 - **Cinecat**: `https://cinecat.eu/*`, `https://*.cinecat.eu/*`
+- **Movy**: `https://movy.sx/*`, `https://*.movy.sx/*`
 
 ---
 

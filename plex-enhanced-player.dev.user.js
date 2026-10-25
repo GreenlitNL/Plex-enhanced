@@ -14,6 +14,8 @@
 // @match        *://*.plex.direct:32400/web/*
 // @match        *://cinecat.eu/*
 // @match        *://*.cinecat.eu/*
+// @match        *://movy.sx/*
+// @match        *://*.movy.sx/*
 // @require      file:///Users/sidbansidhar/Documents/Plex%20enhanced/plex-enhanced-player.user.js
 // @grant        none
 // @run-at       document-idle
