@@ -1,3 +1,9 @@
+## [6.5.1](https://github.com/GreenlitNL/Plex-enhanced/releases/tag/v6.5.1) (2026-10-26)
+
+### Bug Fixes
+
+* fix: prevent hidden menu text from mirroring into PiP on movy.sx
+
 ## [6.5.0](https://github.com/GreenlitNL/Plex-enhanced/releases/tag/v6.5.0) (2026-10-25)
 
 ### Features
