@@ -93,10 +93,12 @@
        STATE MANAGEMENT
        ========================================================================== */
 
-    // Environment detection: checks whether running in native Plex Web or third-party (e.g. Cinecat)
+    // Environment detection: checks whether running in native Plex Web or third-party (e.g. Cinecat, Movy)
     const isPlex = location.hostname.includes('plex.tv') ||
                    location.hostname.includes('plex.direct') ||
                    location.port === '32400';
+    const isCinecat = location.hostname.includes('cinecat');
+    const isMovy = location.hostname.includes('movy');
 
     let currentModeIndex = 0;       // Pointer to currently active preset in CROP_MODES
     let currentSpeed = 1.0;         // Target playback rate maintained across buffer underruns
@@ -731,38 +733,51 @@
         );
     }
 
-    // Extracts clean subtitle text from DOM or active textTracks across Plex & Cinecat
+    // Extracts clean subtitle text from DOM or active textTracks across Plex, Cinecat & Movy
     function extractSubtitleText() {
-        // 1. Cinecat DOM Subtitles (Movie-web React player: p.rounded.text-center or div.pointer-events-none.z-50 p)
-        const cinecatParagraphs = document.querySelectorAll(
-            'div[class*="pointer-events-none"][class*="z-50"] p, p[class*="rounded"][class*="text-center"], div[class*="flex-col"][class*="items-center"] p'
-        );
-        if (cinecatParagraphs.length > 0) {
-            const lines = Array.from(cinecatParagraphs)
-                .map(p => (p.innerText || p.textContent || '').trim())
+        // 1. Movy.sx DOM Subtitles (.vp-cue)
+        const movyCues = document.querySelectorAll('.vp-cue');
+        if (movyCues.length > 0) {
+            const lines = Array.from(movyCues)
+                .map(el => (el.innerText || el.textContent || '').trim())
                 .filter(Boolean);
             if (lines.length > 0) return lines.join('\n');
         }
 
-        // 1b. Cinecat TTML Subtitles (div.pointer-events-none.overflow-hidden span)
-        const cinecatTtml = document.querySelectorAll(
-            'div[class*="pointer-events-none"][class*="overflow-hidden"] span, div[class*="overflow-hidden"] span[class*="inline-block"]'
-        );
-        if (cinecatTtml.length > 0) {
-            const lines = Array.from(cinecatTtml)
-                .map(s => (s.innerText || s.textContent || '').trim())
-                .filter(Boolean);
-            if (lines.length > 0) return lines.join('\n');
+        // 2. Cinecat DOM Subtitles (Movie-web React player: p.rounded.text-center or div.pointer-events-none.z-50 p)
+        if (!isPlex && !isMovy) {
+            const cinecatParagraphs = document.querySelectorAll(
+                'div[class*="pointer-events-none"][class*="z-50"] p, p[class*="rounded"][class*="text-center"], div[class*="flex-col"][class*="items-center"] p'
+            );
+            if (cinecatParagraphs.length > 0) {
+                const lines = Array.from(cinecatParagraphs)
+                    .filter(p => !p.closest('[id^="topbar-"], [class*="opacity-0"], nav, menu, header'))
+                    .map(p => (p.innerText || p.textContent || '').trim())
+                    .filter(Boolean);
+                if (lines.length > 0) return lines.join('\n');
+            }
+
+            // 2b. Cinecat TTML Subtitles (div.pointer-events-none.overflow-hidden span)
+            const cinecatTtml = document.querySelectorAll(
+                'div[class*="pointer-events-none"][class*="overflow-hidden"] span, div[class*="overflow-hidden"] span[class*="inline-block"]'
+            );
+            if (cinecatTtml.length > 0) {
+                const lines = Array.from(cinecatTtml)
+                    .filter(s => !s.closest('[id^="topbar-"], [class*="opacity-0"], nav, menu, header'))
+                    .map(s => (s.innerText || s.textContent || '').trim())
+                    .filter(Boolean);
+                if (lines.length > 0) return lines.join('\n');
+            }
         }
 
-        // 1c. Artplayer / Generic video overlay
+        // 3. Artplayer / Generic video overlay
         const artSub = document.querySelector('.art-subtitle, .art-subtitles, [class*="art-subtitle"]');
         if (artSub) {
             const text = (artSub.innerText || artSub.textContent || '').trim();
             if (text) return text;
         }
 
-        // 2. Plex DOM Subtitles
+        // 4. Plex DOM Subtitles
         const plexContainers = document.querySelectorAll(
             '[class*="Subtitles-container"], [class*="SubtitleRenderer"], [class*="PlayerVideoView-subtitles"], [class*="Subtitles-renderer"], [data-testid="subtitles-renderer"]'
         );
