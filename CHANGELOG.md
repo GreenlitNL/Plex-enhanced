@@ -1,3 +1,9 @@
+## [6.6.0](https://github.com/GreenlitNL/Plex-enhanced/releases/tag/v6.6.0) (2026-11-06)
+
+### Features
+
+* feat: add canvas-streamed native PiP with aspect-ratio lock and subtitle line-break fix
+
 ## [6.5.1](https://github.com/GreenlitNL/Plex-enhanced/releases/tag/v6.5.1) (2026-10-26)
 
 ### Bug Fixes
