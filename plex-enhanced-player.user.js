@@ -1290,6 +1290,22 @@
         renderCanvasPipFrame();
     }
 
+    // Synchronizes real video duration, position, and playbackRate to navigator.mediaSession so Native PiP can seek
+    function syncCanvasPipMediaSession(video = canvasPipSourceVideo) {
+        if (!video || !('mediaSession' in navigator) || typeof navigator.mediaSession.setPositionState !== 'function') return;
+        const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+        if (duration <= 0) return;
+        const position = Math.max(0, Math.min(video.currentTime || 0, duration));
+        const playbackRate = (video.playbackRate && Number.isFinite(video.playbackRate) && video.playbackRate > 0) ? video.playbackRate : 1;
+        try {
+            navigator.mediaSession.setPositionState({
+                duration,
+                playbackRate,
+                position
+            });
+        } catch (e) {}
+    }
+
     // Starts Canvas-Streamed Native Picture-in-Picture with locked OS aspect ratio and live subtitles
     async function startCanvasPip(video) {
         if (!video || !video.isConnected) return false;
@@ -1364,6 +1380,7 @@
             canvasPipIsSyncingPlay = true;
             if (video.paused) video.play().catch(() => {});
             canvasPipIsSyncingPlay = false;
+            syncCanvasPipMediaSession(video);
             forceRenderCanvasPipFrame();
         };
 
@@ -1372,6 +1389,7 @@
             canvasPipIsSyncingPlay = true;
             if (!video.paused) video.pause();
             canvasPipIsSyncingPlay = false;
+            syncCanvasPipMediaSession(video);
         };
 
         const onMainPlay = () => {
@@ -1379,6 +1397,7 @@
             canvasPipIsSyncingPlay = true;
             if (canvasPipVideo && canvasPipVideo.paused) canvasPipVideo.play().catch(() => {});
             canvasPipIsSyncingPlay = false;
+            syncCanvasPipMediaSession(video);
             forceRenderCanvasPipFrame();
         };
 
@@ -1387,16 +1406,23 @@
             canvasPipIsSyncingPlay = true;
             if (canvasPipVideo && !canvasPipVideo.paused) canvasPipVideo.pause();
             canvasPipIsSyncingPlay = false;
+            syncCanvasPipMediaSession(video);
         };
 
         const onMainTimeUpdate = () => {
             updateCanvasPipSubtitles();
+            syncCanvasPipMediaSession(video);
             if (video.paused) forceRenderCanvasPipFrame();
         };
 
         const onMainSeeked = () => {
             updateCanvasPipSubtitles();
+            syncCanvasPipMediaSession(video);
             forceRenderCanvasPipFrame();
+        };
+
+        const onMainRateChange = () => {
+            syncCanvasPipMediaSession(video);
         };
 
         canvasPipVideo.addEventListener('play', onPipPlay);
@@ -1405,6 +1431,7 @@
         video.addEventListener('pause', onMainPause);
         video.addEventListener('timeupdate', onMainTimeUpdate);
         video.addEventListener('seeked', onMainSeeked);
+        video.addEventListener('ratechange', onMainRateChange);
 
         canvasPipCleanups.push(
             () => canvasPipVideo && canvasPipVideo.removeEventListener('play', onPipPlay),
@@ -1412,8 +1439,38 @@
             () => video.removeEventListener('play', onMainPlay),
             () => video.removeEventListener('pause', onMainPause),
             () => video.removeEventListener('timeupdate', onMainTimeUpdate),
-            () => video.removeEventListener('seeked', onMainSeeked)
+            () => video.removeEventListener('seeked', onMainSeeked),
+            () => video.removeEventListener('ratechange', onMainRateChange)
         );
+
+        // Register MediaSession seek handlers so arrow keys & timeline scrubbing inside Native PiP work
+        if ('mediaSession' in navigator && typeof navigator.mediaSession.setActionHandler === 'function') {
+            try {
+                navigator.mediaSession.setActionHandler('seekbackward', () => {
+                    applyCustomSkip('pip-mediasession', -SKIP_SECONDS, video);
+                    syncCanvasPipMediaSession(video);
+                });
+                navigator.mediaSession.setActionHandler('seekforward', () => {
+                    applyCustomSkip('pip-mediasession', SKIP_SECONDS, video);
+                    syncCanvasPipMediaSession(video);
+                });
+                navigator.mediaSession.setActionHandler('seekto', details => {
+                    if (!details || typeof details.seekTime !== 'number' || !Number.isFinite(details.seekTime)) return;
+                    const delta = details.seekTime - video.currentTime;
+                    // Chrome Native PiP arrow keys / skip buttons request a ±10s jump; convert to our 5s skip
+                    if (Math.abs(Math.abs(delta) - 10) < 1.5) {
+                        applyCustomSkip('pip-mediasession', delta > 0 ? SKIP_SECONDS : -SKIP_SECONDS, video);
+                    } else {
+                        const dur = Number.isFinite(video.duration) ? video.duration : Infinity;
+                        video.currentTime = Math.max(0, Math.min(details.seekTime, dur));
+                        if (video.paused) forceRenderCanvasPipFrame();
+                    }
+                    syncCanvasPipMediaSession(video);
+                });
+            } catch (e) {}
+        }
+
+        syncCanvasPipMediaSession(video);
 
         const onLeavePip = () => {
             stopCanvasPip();
