@@ -1,3 +1,9 @@
+## [6.6.1](https://github.com/GreenlitNL/Plex-enhanced/releases/tag/v6.6.1) (2026-11-06)
+
+### Bug Fixes
+
+* fix: sync MediaSession position state and seek handlers for native PiP
+
 ## [6.6.0](https://github.com/GreenlitNL/Plex-enhanced/releases/tag/v6.6.0) (2026-11-06)
 
 ### Features
