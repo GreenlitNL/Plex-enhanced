@@ -113,13 +113,29 @@
     let pipSubtitleSyncObserver = null; // MutationObserver watching for live subtitle text
     let lastPipSubtitleText = '';   // Last mirrored subtitle text to avoid redundant DOM updates
     let isRestoringPip = false;     // Guard flag to prevent re-entrant restore execution
+    let isCanvasPipActive = false;  // Flag indicating whether Canvas-Streamed Native PiP is active
+    let canvasPipVideo = null;      // Offscreen proxy <video> streaming canvas in native PiP
+    let canvasPipSourceVideo = null;// Reference to underlying source video
+    let canvasPipCanvas = null;     // Offscreen canvas element
+    let canvasPipCtx = null;        // 2D context of canvas
+    let canvasPipStream = null;     // MediaStream from canvas.captureStream()
+    let canvasPipRvfcId = null;     // requestVideoFrameCallback handle
+    let canvasPipRafId = null;      // requestAnimationFrame fallback handle
+    let canvasPipSubtitleCache = '';// Cached subtitle text decoupled from 60fps loop
+    let canvasPipSubtitleLines = [];// Cached measured lines for canvas rendering
+    let canvasPipIsSyncingPlay = false; // Guard against ping-pong play/pause events
+    let canvasPipCleanups = [];     // Array of event listener teardown callbacks
 
     /* ==========================================================================
        DOM & VIDEO DISCOVERY HELPERS
        ========================================================================== */
 
-    // Finds the primary active video element (checks Document PiP window first, then host page)
+    // Finds the primary active video element (checks Canvas PiP source, Document PiP window, then host page)
     function getVideo() {
+        if (isCanvasPipActive && canvasPipSourceVideo && canvasPipSourceVideo.isConnected) {
+            return canvasPipSourceVideo;
+        }
+
         if (activePipWindow && !activePipWindow.closed) {
             try {
                 const pipVideo = activePipWindow.document.querySelector('video');
@@ -133,15 +149,15 @@
             );
             if (container) {
                 const v = container.querySelector('video');
-                if (v && v.isConnected) return v;
+                if (v && v.isConnected && v.id !== 'plex-enhanced-canvas-pip-video') return v;
             }
         }
 
         // Cinecat main player video element has id="video-element"
         const cinecatVideo = document.getElementById('video-element');
-        if (cinecatVideo && cinecatVideo.isConnected) return cinecatVideo;
+        if (cinecatVideo && cinecatVideo.isConnected && cinecatVideo.id !== 'plex-enhanced-canvas-pip-video') return cinecatVideo;
 
-        const videos = Array.from(document.querySelectorAll('video')).filter(v => v.isConnected);
+        const videos = Array.from(document.querySelectorAll('video')).filter(v => v.isConnected && v.id !== 'plex-enhanced-canvas-pip-video');
         if (!videos.length) return null;
         // Prioritize currently playing or ready video that has real rendered dimensions
         return videos.find(v => v.readyState >= 1 && !v.paused && v.offsetWidth > 0) ||
@@ -583,6 +599,9 @@
         currentModeIndex = ((index % CROP_MODES.length) + CROP_MODES.length) % CROP_MODES.length;
         const mode = CROP_MODES[currentModeIndex];
         applyCrop(mode);
+        if (isCanvasPipActive && typeof forceRenderCanvasPipFrame === 'function') {
+            forceRenderCanvasPipFrame();
+        }
         if (isStatusOsdVisible()) {
             updateStatusOsdContent('crop');
         } else if (showToast) {
@@ -723,12 +742,13 @@
        MODULE 4: PICTURE-IN-PICTURE (PIP) WITH LIVE SUBTITLE MIRRORING
        ========================================================================== */
 
-    // Checks if video is currently displaying in Picture-in-Picture mode (Document PiP or native PiP)
+    // Checks if video is currently displaying in Picture-in-Picture mode (Canvas PiP, Document PiP, or direct native PiP)
     function isPipActive(video = getVideo()) {
+        if (isCanvasPipActive) return true;
         if (activePipWindow && !activePipWindow.closed) return true;
         if (!video) return false;
         return Boolean(
-            document.pictureInPictureElement === video ||
+            document.pictureInPictureElement ||
             (video.webkitPresentationMode && video.webkitPresentationMode === 'picture-in-picture')
         );
     }
@@ -783,24 +803,15 @@
         );
 
         for (const container of plexContainers) {
-            // Check for explicit renderer child if present (avoids font-measurement 'M' sibling entirely)
-            const renderer = container.querySelector('[class*="renderer" i], [class*="cue" i]');
-            if (renderer) {
-                const rRaw = (renderer.innerText || renderer.textContent || '').trim();
-                if (rRaw && rRaw !== 'M' && rRaw !== 'm') {
-                    const lines = rRaw.split('\n').map(l => l.trim()).filter(l => l.length > 0 && l !== 'M' && l !== 'm');
-                    if (lines.length > 0) return lines.join('\n');
-                }
-            }
-
-            // Fallback: clone container and strip any measurement elements
             try {
                 const clone = container.cloneNode(true);
-                clone.querySelectorAll('[class*="measure" i]').forEach(el => el.remove());
-                const raw = (clone.innerText || clone.textContent || '').trim();
+                clone.querySelectorAll('[class*="measure" i], style, script').forEach(el => el.remove());
+                clone.querySelectorAll('br').forEach(br => br.replaceWith('\n'));
+                clone.querySelectorAll('div, p, [data-dialogue-id]').forEach(block => block.append('\n'));
+                const raw = (clone.textContent || '').replace(/[\u200B-\u200D\uFEFF]/g, '');
                 if (raw && raw !== 'M' && raw !== 'm') {
                     const cleanedLines = raw.split('\n')
-                        .map(l => l.trim())
+                        .map(l => l.replace(/\s+/g, ' ').trim())
                         .filter(l => l.length > 0 && l !== 'M' && l !== 'm');
                     if (cleanedLines.length > 0) {
                         return cleanedLines.join('\n');
@@ -1108,8 +1119,389 @@
         ? document.exitPictureInPicture
         : null;
 
-    // Toggles Picture-in-Picture (prefers Document PiP with live subtitles, falls back to native PiP, or forceNative via Shift+P)
-    async function togglePictureInPicture(video = getVideo(), forceNative = false) {
+    // Pre-flight probe to verify canvas will not be tainted by CORS restrictions
+    function isCanvasCaptureSafe(video) {
+        if (!video || !video.isConnected) return false;
+        try {
+            const probeCanvas = document.createElement('canvas');
+            probeCanvas.width = 16;
+            probeCanvas.height = 16;
+            const probeCtx = probeCanvas.getContext('2d');
+            probeCtx.drawImage(video, 0, 0, 16, 16);
+            probeCanvas.toDataURL(); // Throws SecurityError if tainted
+            return true;
+        } catch (e) {
+            console.warn('[Plex Enhanced Player] Canvas is tainted (CORS restriction), falling back to Document PiP:', e);
+            return false;
+        }
+    }
+
+    // Calculates source clipping coordinates and target canvas dimensions based on video resolution and active crop
+    function calculateCanvasPipGeometry(video, mode) {
+        const vw = video.videoWidth || 1920;
+        const vh = video.videoHeight || 1080;
+        const rv = vw / vh;
+        let sw = vw, sh = vh, sx = 0, sy = 0;
+
+        if (mode && typeof mode.ratio === 'number') {
+            const rt = mode.ratio;
+            if (rt >= rv) {
+                sw = vw;
+                sh = Math.round(vw / rt);
+                sx = 0;
+                sy = Math.round((vh - sh) / 2);
+            } else {
+                sh = vh;
+                sw = Math.round(vh * rt);
+                sy = 0;
+                sx = Math.round((vw - sw) / 2);
+            }
+        }
+
+        // Cap canvas dimensions to 1920px width to avoid excessive GPU memory bandwidth on 4K sources
+        let cw = sw, ch = sh;
+        if (cw > 1920) {
+            ch = Math.max(100, Math.round(ch * (1920 / cw)));
+            cw = 1920;
+        }
+
+        return { cw, ch, sx, sy, sw, sh };
+    }
+
+    // Updates cached subtitle text and lines outside of the 60fps render loop to prevent DOM thrashing
+    function updateCanvasPipSubtitles() {
+        if (!isCanvasPipActive) return;
+        const raw = extractSubtitleText();
+        if (raw === canvasPipSubtitleCache) return;
+        canvasPipSubtitleCache = raw;
+        canvasPipSubtitleLines = raw ? raw.split('\n').map(l => l.trim()).filter(Boolean) : [];
+        if (canvasPipSourceVideo && canvasPipSourceVideo.paused) {
+            forceRenderCanvasPipFrame();
+        }
+    }
+
+    // Renders the cached subtitle lines cleanly with dynamic wrapping, background pill, and drop shadow
+    function drawCanvasPipSubtitles(ctx, cw, ch) {
+        if (!canvasPipSubtitleLines.length) return;
+
+        const fontSize = Math.max(16, Math.min(46, Math.round(ch * 0.046)));
+        ctx.font = `600 ${fontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        const maxLineWidth = cw * 0.86;
+        const linesToRender = [];
+        for (const rawLine of canvasPipSubtitleLines) {
+            if (ctx.measureText(rawLine).width <= maxLineWidth) {
+                linesToRender.push(rawLine);
+            } else {
+                const words = rawLine.split(' ');
+                let current = '';
+                for (const word of words) {
+                    const test = current ? `${current} ${word}` : word;
+                    if (ctx.measureText(test).width <= maxLineWidth) {
+                        current = test;
+                    } else {
+                        if (current) linesToRender.push(current);
+                        current = word;
+                    }
+                }
+                if (current) linesToRender.push(current);
+            }
+        }
+
+        if (!linesToRender.length) return;
+
+        const lineHeight = Math.round(fontSize * 1.35);
+        const paddingH = Math.round(fontSize * 0.75);
+        const paddingV = Math.round(fontSize * 0.38);
+        const totalTextH = linesToRender.length * lineHeight;
+        const pillH = totalTextH + paddingV * 2;
+
+        let maxW = 0;
+        for (const l of linesToRender) {
+            const w = ctx.measureText(l).width;
+            if (w > maxW) maxW = w;
+        }
+        const pillW = Math.min(cw * 0.94, maxW + paddingH * 2);
+        const pillX = Math.round((cw - pillW) / 2);
+        const pillY = Math.round(ch * 0.92 - pillH);
+
+        ctx.save();
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.78)';
+        const radius = Math.min(8, Math.round(fontSize * 0.25));
+        if (typeof ctx.roundRect === 'function') {
+            ctx.beginPath();
+            ctx.roundRect(pillX, pillY, pillW, pillH, radius);
+            ctx.fill();
+        } else {
+            ctx.fillRect(pillX, pillY, pillW, pillH);
+        }
+
+        ctx.fillStyle = '#ffffff';
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.95)';
+        ctx.shadowBlur = Math.round(fontSize * 0.15);
+        ctx.shadowOffsetY = 1;
+
+        const centerX = Math.round(cw / 2);
+        let textY = pillY + paddingV + Math.round(lineHeight / 2);
+        for (const line of linesToRender) {
+            ctx.fillText(line, centerX, textY);
+            textY += lineHeight;
+        }
+        ctx.restore();
+    }
+
+    // Paints one video frame + subtitle overlay onto the canvas and requests next frame when playing
+    function renderCanvasPipFrame() {
+        if (!isCanvasPipActive || !canvasPipSourceVideo || !canvasPipCanvas || !canvasPipCtx) return;
+
+        const video = canvasPipSourceVideo;
+        const geom = calculateCanvasPipGeometry(video, CROP_MODES[currentModeIndex]);
+
+        if (canvasPipCanvas.width !== geom.cw || canvasPipCanvas.height !== geom.ch) {
+            canvasPipCanvas.width = geom.cw;
+            canvasPipCanvas.height = geom.ch;
+        }
+
+        canvasPipCtx.drawImage(video, geom.sx, geom.sy, geom.sw, geom.sh, 0, 0, geom.cw, geom.ch);
+        drawCanvasPipSubtitles(canvasPipCtx, geom.cw, geom.ch);
+
+        if (!video.paused && !video.ended) {
+            if (typeof video.requestVideoFrameCallback === 'function') {
+                canvasPipRvfcId = video.requestVideoFrameCallback(renderCanvasPipFrame);
+            } else {
+                canvasPipRafId = requestAnimationFrame(renderCanvasPipFrame);
+            }
+        }
+    }
+
+    // Forces an immediate synchronous render of the canvas (used during seek, pause, and subtitle changes)
+    function forceRenderCanvasPipFrame() {
+        if (!isCanvasPipActive || !canvasPipSourceVideo || !canvasPipCanvas || !canvasPipCtx) return;
+        if (canvasPipRvfcId && typeof canvasPipSourceVideo.cancelVideoFrameCallback === 'function') {
+            canvasPipSourceVideo.cancelVideoFrameCallback(canvasPipRvfcId);
+            canvasPipRvfcId = null;
+        }
+        if (canvasPipRafId) {
+            cancelAnimationFrame(canvasPipRafId);
+            canvasPipRafId = null;
+        }
+        renderCanvasPipFrame();
+    }
+
+    // Starts Canvas-Streamed Native Picture-in-Picture with locked OS aspect ratio and live subtitles
+    async function startCanvasPip(video) {
+        if (!video || !video.isConnected) return false;
+        if (isCanvasPipActive) return true;
+
+        if (!isCanvasCaptureSafe(video)) {
+            return false;
+        }
+
+        if (!canvasPipCanvas) {
+            canvasPipCanvas = document.createElement('canvas');
+        }
+        canvasPipCtx = canvasPipCanvas.getContext('2d', { alpha: false, desynchronized: true });
+
+        const geom = calculateCanvasPipGeometry(video, CROP_MODES[currentModeIndex]);
+        canvasPipCanvas.width = geom.cw;
+        canvasPipCanvas.height = geom.ch;
+
+        updateCanvasPipSubtitles();
+        canvasPipCtx.drawImage(video, geom.sx, geom.sy, geom.sw, geom.sh, 0, 0, geom.cw, geom.ch);
+        drawCanvasPipSubtitles(canvasPipCtx, geom.cw, geom.ch);
+
+        if (typeof canvasPipCanvas.captureStream !== 'function') {
+            return false;
+        }
+        canvasPipStream = canvasPipCanvas.captureStream(60);
+
+        if (!canvasPipVideo || !canvasPipVideo.isConnected) {
+            canvasPipVideo = document.createElement('video');
+            canvasPipVideo.id = 'plex-enhanced-canvas-pip-video';
+            canvasPipVideo.muted = true;
+            canvasPipVideo.playsInline = true;
+            canvasPipVideo.style.cssText = 'position:fixed!important;top:-9999px!important;left:-9999px!important;width:1px!important;height:1px!important;opacity:0!important;pointer-events:none!important;z-index:-9999!important;';
+            document.body.appendChild(canvasPipVideo);
+        }
+
+        canvasPipVideo.srcObject = canvasPipStream;
+
+        try {
+            await canvasPipVideo.play();
+        } catch (e) {
+            console.warn('[Plex Enhanced Player] Canvas proxy video play warning:', e);
+        }
+
+        if (canvasPipVideo.readyState < 2) {
+            await new Promise(resolve => {
+                const onReady = () => {
+                    canvasPipVideo.removeEventListener('loadeddata', onReady);
+                    canvasPipVideo.removeEventListener('canplay', onReady);
+                    resolve();
+                };
+                canvasPipVideo.addEventListener('loadeddata', onReady, { once: true });
+                canvasPipVideo.addEventListener('canplay', onReady, { once: true });
+                setTimeout(resolve, 250);
+            });
+        }
+
+        if (typeof nativeRequestPictureInPicture === 'function') {
+            await nativeRequestPictureInPicture.call(canvasPipVideo);
+        } else if (typeof canvasPipVideo.requestPictureInPicture === 'function') {
+            await canvasPipVideo.requestPictureInPicture();
+        } else {
+            return false;
+        }
+
+        isCanvasPipActive = true;
+        canvasPipSourceVideo = video;
+        canvasPipCleanups = [];
+
+        const onPipPlay = () => {
+            if (canvasPipIsSyncingPlay) return;
+            canvasPipIsSyncingPlay = true;
+            if (video.paused) video.play().catch(() => {});
+            canvasPipIsSyncingPlay = false;
+            forceRenderCanvasPipFrame();
+        };
+
+        const onPipPause = () => {
+            if (canvasPipIsSyncingPlay) return;
+            canvasPipIsSyncingPlay = true;
+            if (!video.paused) video.pause();
+            canvasPipIsSyncingPlay = false;
+        };
+
+        const onMainPlay = () => {
+            if (canvasPipIsSyncingPlay) return;
+            canvasPipIsSyncingPlay = true;
+            if (canvasPipVideo && canvasPipVideo.paused) canvasPipVideo.play().catch(() => {});
+            canvasPipIsSyncingPlay = false;
+            forceRenderCanvasPipFrame();
+        };
+
+        const onMainPause = () => {
+            if (canvasPipIsSyncingPlay) return;
+            canvasPipIsSyncingPlay = true;
+            if (canvasPipVideo && !canvasPipVideo.paused) canvasPipVideo.pause();
+            canvasPipIsSyncingPlay = false;
+        };
+
+        const onMainTimeUpdate = () => {
+            updateCanvasPipSubtitles();
+            if (video.paused) forceRenderCanvasPipFrame();
+        };
+
+        const onMainSeeked = () => {
+            updateCanvasPipSubtitles();
+            forceRenderCanvasPipFrame();
+        };
+
+        canvasPipVideo.addEventListener('play', onPipPlay);
+        canvasPipVideo.addEventListener('pause', onPipPause);
+        video.addEventListener('play', onMainPlay);
+        video.addEventListener('pause', onMainPause);
+        video.addEventListener('timeupdate', onMainTimeUpdate);
+        video.addEventListener('seeked', onMainSeeked);
+
+        canvasPipCleanups.push(
+            () => canvasPipVideo && canvasPipVideo.removeEventListener('play', onPipPlay),
+            () => canvasPipVideo && canvasPipVideo.removeEventListener('pause', onPipPause),
+            () => video.removeEventListener('play', onMainPlay),
+            () => video.removeEventListener('pause', onMainPause),
+            () => video.removeEventListener('timeupdate', onMainTimeUpdate),
+            () => video.removeEventListener('seeked', onMainSeeked)
+        );
+
+        const onLeavePip = () => {
+            stopCanvasPip();
+        };
+        canvasPipVideo.addEventListener('leavepictureinpicture', onLeavePip, { once: true });
+        canvasPipCleanups.push(() => {
+            if (canvasPipVideo) canvasPipVideo.removeEventListener('leavepictureinpicture', onLeavePip);
+        });
+
+        pipSubtitleSyncObserver = new MutationObserver(updateCanvasPipSubtitles);
+        pipSubtitleSyncObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+
+        forceRenderCanvasPipFrame();
+        handlePipEnter();
+        return true;
+    }
+
+    // Teardown and resource cleanup for Canvas-Streamed Native PiP
+    function stopCanvasPip() {
+        if (!isCanvasPipActive) return;
+        isCanvasPipActive = false;
+
+        if (canvasPipRvfcId && canvasPipSourceVideo && typeof canvasPipSourceVideo.cancelVideoFrameCallback === 'function') {
+            try { canvasPipSourceVideo.cancelVideoFrameCallback(canvasPipRvfcId); } catch (e) {}
+            canvasPipRvfcId = null;
+        }
+        if (canvasPipRafId) {
+            cancelAnimationFrame(canvasPipRafId);
+            canvasPipRafId = null;
+        }
+
+        for (const cleanup of canvasPipCleanups) {
+            try { cleanup(); } catch (e) {}
+        }
+        canvasPipCleanups = [];
+
+        if (pipSubtitleSyncObserver) {
+            pipSubtitleSyncObserver.disconnect();
+            pipSubtitleSyncObserver = null;
+        }
+
+        if (canvasPipStream) {
+            try {
+                canvasPipStream.getTracks().forEach(t => t.stop());
+            } catch (e) {}
+            canvasPipStream = null;
+        }
+
+        if (document.pictureInPictureElement && document.pictureInPictureElement === canvasPipVideo) {
+            try {
+                if (typeof nativeExitPictureInPicture === 'function') {
+                    nativeExitPictureInPicture.call(document).catch(() => {});
+                } else if (typeof document.exitPictureInPicture === 'function') {
+                    document.exitPictureInPicture().catch(() => {});
+                }
+            } catch (e) {}
+        }
+
+        if (canvasPipVideo) {
+            canvasPipVideo.srcObject = null;
+            if (canvasPipVideo.parentElement) {
+                canvasPipVideo.remove();
+            }
+            canvasPipVideo = null;
+        }
+
+        if (canvasPipCanvas) {
+            canvasPipCanvas.width = 0;
+            canvasPipCanvas.height = 0;
+            canvasPipCanvas = null;
+            canvasPipCtx = null;
+        }
+
+        canvasPipSourceVideo = null;
+        canvasPipSubtitleCache = '';
+        canvasPipSubtitleLines = [];
+        canvasPipIsSyncingPlay = false;
+
+        handlePipLeave();
+    }
+
+    // Toggles Picture-in-Picture (prefers Canvas-Streamed Native PiP with locked OS aspect ratio & live subtitles; Shift+P opens Document PiP)
+    async function togglePictureInPicture(video = getVideo(), forceDocumentPip = false) {
+        if (isCanvasPipActive) {
+            stopCanvasPip();
+            return;
+        }
+
         if (activePipWindow && !activePipWindow.closed) {
             restoreFromDocumentPip();
             return;
@@ -1117,17 +1509,41 @@
 
         if (!video) return;
 
-        // Try Document Picture-in-Picture API first (unless native PiP is explicitly forced via Shift+P)
-        if (!forceNative && 'documentPictureInPicture' in window && typeof window.documentPictureInPicture.requestWindow === 'function') {
+        // Explicit Document PiP request (Shift+P)
+        if (forceDocumentPip && 'documentPictureInPicture' in window && typeof window.documentPictureInPicture.requestWindow === 'function') {
             try {
                 await openDocumentPip(video);
                 return;
             } catch (err) {
-                console.warn('[Plex Enhanced Player] Document PiP failed, falling back to native PiP:', err);
+                console.warn('[Plex Enhanced Player] Document PiP launch failed:', err);
             }
         }
 
-        // Fallback or explicit native video PiP
+        // Primary: Canvas-Streamed Native PiP (locked OS aspect ratio + live subtitles)
+        const canUseCanvasPip = typeof HTMLCanvasElement !== 'undefined' &&
+                                Boolean(HTMLCanvasElement.prototype.captureStream) &&
+                                Boolean(nativeRequestPictureInPicture || document.pictureInPictureEnabled);
+
+        if (canUseCanvasPip && !forceDocumentPip) {
+            try {
+                const started = await startCanvasPip(video);
+                if (started) return;
+            } catch (err) {
+                console.warn('[Plex Enhanced Player] Canvas PiP failed, attempting Document/Native PiP fallback:', err);
+            }
+        }
+
+        // Secondary fallback: Document PiP
+        if ('documentPictureInPicture' in window && typeof window.documentPictureInPicture.requestWindow === 'function') {
+            try {
+                await openDocumentPip(video);
+                return;
+            } catch (err) {
+                console.warn('[Plex Enhanced Player] Document PiP fallback failed:', err);
+            }
+        }
+
+        // Final fallback: Direct Native Video PiP
         const pipSupported = Boolean(
             document.pictureInPictureEnabled ||
             nativeRequestPictureInPicture ||
@@ -1166,23 +1582,24 @@
         }
     }
 
-    // Intercept native requestPictureInPicture so Cinecat on-screen PiP button routes through Document PiP
+    // Intercept native requestPictureInPicture so third-party on-screen buttons route through Enhanced PiP
     if (nativeRequestPictureInPicture) {
         HTMLVideoElement.prototype.requestPictureInPicture = async function () {
-            if ('documentPictureInPicture' in window && typeof window.documentPictureInPicture.requestWindow === 'function') {
-                try {
-                    await openDocumentPip(this);
-                    return activePipWindow;
-                } catch (err) {
-                    console.warn('[Plex Enhanced Player] Document PiP intercept fallback:', err);
-                }
+            // Never intercept our internal proxy video element
+            if (this.id === 'plex-enhanced-canvas-pip-video') {
+                return nativeRequestPictureInPicture.apply(this, arguments);
             }
-            return nativeRequestPictureInPicture.apply(this, arguments);
+            await togglePictureInPicture(this);
+            return document.pictureInPictureElement || this;
         };
     }
 
     if (nativeExitPictureInPicture) {
         document.exitPictureInPicture = async function () {
+            if (isCanvasPipActive) {
+                stopCanvasPip();
+                return;
+            }
             if (activePipWindow && !activePipWindow.closed) {
                 restoreFromDocumentPip();
                 return;
@@ -1321,7 +1738,7 @@
             return;
         }
 
-        // 'P' : Toggle Picture-in-Picture ('P' = Document PiP with live subtitles, 'Shift+P' = Frameless Native PiP)
+        // 'P' : Toggle Picture-in-Picture ('P' = Canvas Native PiP with aspect-ratio lock & subtitles, 'Shift+P' = Document PiP)
         if (key === 'p' || key === 'P' || code === 'KeyP') {
             e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
             togglePictureInPicture(v, e.shiftKey);
